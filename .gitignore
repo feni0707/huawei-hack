@@ -1,0 +1,6 @@
+.DS_Store
+build/
+score.txt
+answer.txt
+report.txt
+*.o
