@@ -21,8 +21,10 @@ typedef long long ll;
 // P8 выбор стороны (0 лево, 1 остаток к молодому соседу, 2 к старому, 3 право)
 // P10 потоки (0 нет, 1 оракул, 2 по признакам), P11 горизонт оракула, P20 размер участка для потока B, м,
 // P21 мин. число пар удалений для включения, P22 порог каппы, P23 затухание рождений, P24 затухание пар
-static double P[32] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                       200, 20, 0.6, 0.999, 0.998};
+// P15 мёртвый остаток >= P15 — в хвост (0 выкл), P16 штраф мёртвого остатка с учётом риска смерти соседей
+//      0  1      2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19
+static double P[32] = {0.999, 0.002, 0, 0, 4, 0, 1, 0, 4, 0, 2, 0, 0, 0, 0, 0, 3, 0, 0, 0,
+                       400, 20, 0.6, 0.999, 0.998};
 
 // ---------------------------------------------------------------- аллокатор
 // Свободные промежутки: граничные метки (склейка за O(1)) + корзины по точной длине (< NB) + set для больших.
@@ -111,6 +113,23 @@ struct Alloc {
     double coSame[NF] = {0}, coTot[NF] = {0};   // соседние удаления в пачке: совпал ли признак
     double birthV[NF][2] = {{0}}, deathV[NF][2] = {{0}};
     int lastDelPid = 0; bool lastWasDel = false;
+    // ---- риск смерти соседа по возрасту
+    // aliveBit — дерево Фенвика по PID (живые), deathAge[b] — число смертей в возрасте [2^b-1, 2^(b+1)-1)
+    std::vector<int> aliveBit;
+    double deathAge[24] = {0};
+    void bitAdd(int i, int v) { for (; i < (int)aliveBit.size(); i += i & -i) aliveBit[i] += v; }
+    int bitSum(int i) const { int s = 0; for (; i > 0; i -= i & -i) s += aliveBit[i]; return s; }
+    static int ageBucket(int a) { int b = 0; while ((2 << b) - 1 <= a && b < 23) b++; return b; }
+    // P(труба PID p когда-нибудь умрёт | дожила до текущего возраста)
+    double hazard(int p) const {
+        if (p <= 0) return 0;   // край траншеи
+        int cur = (int)pos.size() - 1;
+        int a = cur - p, b = ageBucket(a);
+        double dGE = 0; for (int k = b; k < 24; k++) dGE += deathAge[k];
+        int lo = cur - ((1 << b) - 1);   // живые с возрастом >= 2^b-1
+        double aGE = lo > 0 ? bitSum(lo) : 0;
+        return dGE + aGE > 0 ? dGE / (dGE + aGE) : 0.5;
+    }
     const int* oracleDeath = nullptr;   // только SIM-эксперименты: время смерти по PID (команда), -1 — не умрёт
     int curCmd = 0;
 
@@ -158,6 +177,7 @@ struct Alloc {
             if (rc == st && lc != st) return gs + r;
             return st == 1 ? gs + r : gs;
         }
+        if (P[8] == 4) { if (hazard(lp) > hazard(rp)) return gs + r; return gs; }
         if (P[8] == 1) { if (lp > rp) return gs + r; }
         else if (P[8] == 3) return gs + r;
         return gs;
@@ -195,6 +215,11 @@ struct Alloc {
                 cst = -(double)gs;                          // last fit
             } else {
                 cst = s == L ? -P[5] : fragCost(s - L, m) + P[6] * (s - L);
+                if (P[16] != 0 && s > L && s - L < m) {
+                    // мёртвый остаток оживёт, только если умрёт сосед: штраф ~ r * P(оба соседа выживут)
+                    double hl = hazard(pidEndAt[gs]), hr = hazard(pidStartAt[gs + s]);
+                    cst += P[16] * (s - L) * (1 - std::max(hl, hr));
+                }
             }
             if (cst < bestC) { bestC = cst; bgs = gs; bs = s; }
         };
@@ -215,6 +240,8 @@ struct Alloc {
         ll N = 0; int D;
         bool useGap = bgs >= 0 && bestC < P[7] + 1e17 * (P[7] == 0);
         if (st == 1 && P[12] == 2) useGap = false;
+        // P15: если лучший промежуток оставляет мёртвый остаток >= P15 — лучше в хвост
+        if (useGap && P[15] > 0) { int r = bs - L; if (r > 0 && r < m && r >= P[15]) useGap = false; }
         if (useGap) {
             D = chooseSide(bgs, bs, L, st);
             takeFrom(bgs, D, L);
@@ -249,13 +276,23 @@ struct Alloc {
             }
         }
         pidStartAt[D] = pid; pidEndAt[D + L] = pid;
-        pos.push_back(D); len.push_back(L);
+        pos.push_back(D); len.push_back(L); alive.push_back(1);
+        if ((int)aliveBit.size() <= pid) aliveBit.resize(std::max<size_t>(pid + 1, aliveBit.size() * 2 + 16), 0), rebuildBit();
+        bitAdd(pid, 1);
         observe(L); nPlaced++;
         lastWasDel = false;
         return {N, D};
     }
+    void rebuildBit() {
+        // после расширения массива Фенвика пересобрать по живым
+        std::fill(aliveBit.begin(), aliveBit.end(), 0);
+        for (int p = 1; p < (int)pos.size() && p < (int)aliveBit.size(); p++) if (alive[p]) bitAdd(p, 1);
+    }
+    std::vector<char> alive;
     ll remove(int pid) {
         int d = pos[pid], l = len[pid];
+        alive[pid] = 0; bitAdd(pid, -1);
+        deathAge[ageBucket((int)pos.size() - 1 - pid)] += 1;
         pidStartAt[d] = 0; pidEndAt[d + l] = 0;
         int e = freeRange(d, l);
         if (d == F) F = e;
@@ -277,7 +314,7 @@ struct Alloc {
         for (int s = 1; s < NB; s++) for (int g : bucket[s]) if (g != ts) { holes += s; if (s < 8) small += s; }
         for (auto& g : big) if (g.second != ts) holes += g.first;
     }
-    Alloc() { pos.push_back(-1); len.push_back(0); feat.push_back(0); stream.push_back(-1); ensure(1024); }
+    Alloc() { pos.push_back(-1); len.push_back(0); feat.push_back(0); stream.push_back(-1); alive.push_back(0); ensure(1024); }
 };
 
 #ifdef SIM
@@ -348,6 +385,14 @@ int main(int argc, char** argv) {
             printf("  free: never=%lld", never);
             long long sh = 0, lg = 0; for (int l = 1; l <= 40; l++) (l <= 7 ? sh : lg) += byLen[l];
             printf(" was_short=%lld was_long=%lld\n", sh, lg);
+        }
+        if (getenv("SFHOLES") && ok) {
+            int from = atoi(getenv("SFHOLES"));
+            long long h[200] = {0}; long long tot = 0;
+            for (size_t i = from; i < cells.size();) { if (cells[i]) { i++; continue; } size_t j = i; while (j < cells.size() && !cells[j]) j++; int s = (int)std::min<size_t>(j - i, 199); if (j < cells.size()) { h[s] += j - i; tot += j - i; } i = j; }
+            printf("  holes from %d: total %lld; by size (meters):", from, tot);
+            for (int s = 1; s < 200; s++) if (h[s]) printf(" %d:%lld", s, h[s]);
+            printf("\n");
         }
         double kpi = ok && !cells.empty() ? (double)occ / cells.size() : 0;
         if (!ok) fprintf(stderr, "WA on %s\n", argv[a]);
