@@ -322,6 +322,7 @@ struct Alloc {
             if (P[29] != 0 && st >= 0 && (kin(pidLeftOf(gs), st) || kin(pidRightOf(gs + s), st))) cst -= P[29];
             if (P[40 - 1 + 0] != 0 && false) {}
             if (P[15] > 0 && P[33] == 2 && st < 0 && s > L && s - L < m && s - L >= P[15]) cst = 1e17;   // мёртвый остаток — не кандидат
+            if (P[15] > 0 && P[33] == 3 && st < 0 && s > L && s - L < m && s - L >= P[15]) cst += 1e6;   // мёртвый остаток — в последнюю очередь
             if (tieAge != 0) {
                 // разбивка ничьих по возрасту соседей (молодые = большой PID)
                 int lp = pidLeftOf(gs), rp = pidRightOf(gs + s);
