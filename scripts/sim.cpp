@@ -84,7 +84,7 @@ static std::string CSV;
 static int THREADS = 0;
 static void dumpHoles(const Alloc& a) {
     long long cnt[41] = {0}, cells[41] = {0};
-    for (auto& kv : a.byAddr) { int h = std::min(kv.second.len, 40); cnt[h]++; cells[h] += kv.second.len; }
+    a.forEachHole([&](int, int len, int) { int h = std::min(len, 40); cnt[h]++; cells[h] += len; });
     long long tot = 0;
     printf("   holes (size: count/cells):");
     for (int h = 1; h <= 40; h++) if (cnt[h]) { printf(" %d%s:%lld/%lld", h, h == 40 ? "+" : "", cnt[h], cells[h]); tot += cells[h]; }
@@ -102,7 +102,7 @@ static Result run(const Test& t, F makeEngine) {
         ci++;
         if (TRACE && ci % (t.cmds.size() / 20) == 0) {
             long long hc = 0, small = 0, nh = 0;
-            for (auto& kv : eng->real.byAddr) { hc += kv.second.len; nh++; if (kv.second.len <= 7) small += kv.second.len; }
+            eng->real.forEachHole([&](int, int len, int) { hc += len; nh++; if (len <= 7) small += len; });
             printf("   t=%zu trench=%d live=%lld holes=%lld (%.2f%%) nholes=%lld small<=7:%lld tail=%d\n", ci, eng->real.trench, eng->real.live, hc, 100.0 * hc / eng->real.trench, nh, small, eng->real.trench - eng->real.tailStart);
         }
         if (c > 0) {

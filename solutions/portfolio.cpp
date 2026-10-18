@@ -60,12 +60,12 @@ static inline int clz64idx(uint64_t x) {  // индекс старшего би�
 
 // ---------------------------------------------------------------- политики
 
-enum Sel { BEST, FIRST, LAST, WORST, EXACTWORST, TFIT };
+enum Sel { BEST, FIRST, LAST_UNUSED, WORST, EXACTWORST, TFIT };   // LAST убран (кучи хранят только минимальный адрес)
 
 struct Pol {
     const char* name;
     Sel sel;          // как выбирать дыру для обычных (P) труб
-    bool tieHigh;     // при равенстве размеров брать дыру с большим адресом
+    bool tieHigh;     // (не используется; оставлено для совместимости пулов)
     bool right;       // класть к правому краю дыры
     bool tailFirst;   // хвост — обычный кандидат: если влезает, класть туда до поиска дыр
     int js;           // горизонт предсказателя для класса T (скоротечные); -1 — без арен, все трубы класса P
@@ -93,22 +93,70 @@ static std::vector<Pol>& polTable() {
 #define POLS (polTable())
 #define NPOL ((int)polTable().size())
 
-// ---------------------------------------------------------------- множество свободных дыр одного тега
+// ---------------------------------------------------------------- хеш-таблица дыр и множество свободных дыр одного тега
 
+// Открытая адресация, ключ — адрес (>= 0), значение — длина и тег; удаление со сдвигом назад (без надгробий).
+struct HTab {
+    std::vector<int> key, val;
+    std::vector<uint8_t> tag;
+    unsigned cap = 0, msk = 0, count = 0;
+    HTab() { init(256); }
+    void init(unsigned c) { cap = c; msk = c - 1; key.assign(c, -1); val.assign(c, 0); tag.assign(c, 0); count = 0; }
+    static inline unsigned hsh(int k) { return (unsigned)k * 2654435761u; }
+    inline unsigned home(int k) const { return (hsh(k) >> 7) & msk; }
+    inline int find(int k) const {   // индекс слота или -1
+        unsigned i = home(k);
+        while (key[i] != -1) { if (key[i] == k) return (int)i; i = (i + 1) & msk; }
+        return -1;
+    }
+    void put(int k, int v, int t) {
+        if ((count + 1) * 2 > cap) grow();
+        unsigned i = home(k);
+        while (key[i] != -1) i = (i + 1) & msk;
+        key[i] = k; val[i] = v; tag[i] = (uint8_t)t; count++;
+    }
+    void grow() {
+        std::vector<int> ok = std::move(key), ov = std::move(val);
+        std::vector<uint8_t> ot = std::move(tag);
+        unsigned oc = cap;
+        init(cap * 2);
+        for (unsigned i = 0; i < oc; i++) if (ok[i] != -1) put(ok[i], ov[i], ot[i]);
+    }
+    void erase(int k) {
+        int ii = find(k);
+        unsigned i = (unsigned)ii, j = i;
+        for (;;) {
+            j = (j + 1) & msk;
+            if (key[j] == -1) break;
+            unsigned h = home(key[j]);
+            if (i <= j ? (i < h && h <= j) : (i < h || h <= j)) continue;
+            key[i] = key[j]; val[i] = val[j]; tag[i] = tag[j];
+            i = j;
+        }
+        key[i] = -1;
+        count--;
+    }
+};
+
+// Дыры одного тега: корзины по размеру 1..39 — минимальные кучи адресов с ленивым удалением (актуальность проверяется
+// по таблице дыр), большие дыры (>= 40) — упорядоченные множества. Счётчики cnt[] точные.
 struct HoleSet {
-    std::set<int> sz[40];                 // дыры длины 1..39: адреса
+    std::vector<int> heap[40];            // min-кучи адресов дыр длины s (могут содержать устаревшие записи)
+    int cnt[40] = {0};                    // число актуальных дыр длины s (1..39)
     std::set<std::pair<int, int>> big;    // дыры длины >= 40: (длина, адрес)
     std::set<int> bigAddr;                // они же по адресу
     uint64_t mask = 0;                    // бит s (1..39) — есть дыра длины s; бит 40 — есть большая
-    int cnt[40] = {0};                    // число дыр длины s (1..39)
     long long bigSum = 0;                 // суммарная длина больших дыр
 
     void add(int a, int h) {
-        if (h < 40) { sz[h].insert(a); mask |= 1ull << h; cnt[h]++; }
-        else { big.insert({h, a}); bigAddr.insert(a); mask |= 1ull << 40; bigSum += h; }
+        if (h < 40) {
+            heap[h].push_back(a);
+            std::push_heap(heap[h].begin(), heap[h].end(), std::greater<int>());
+            cnt[h]++; mask |= 1ull << h;
+        } else { big.insert({h, a}); bigAddr.insert(a); mask |= 1ull << 40; bigSum += h; }
     }
     void del(int a, int h) {
-        if (h < 40) { sz[h].erase(a); cnt[h]--; if (sz[h].empty()) mask &= ~(1ull << h); }
+        if (h < 40) { cnt[h]--; if (!cnt[h]) mask &= ~(1ull << h); }
         else { big.erase({h, a}); bigAddr.erase(a); bigSum -= h; if (big.empty()) mask &= ~(1ull << 40); }
     }
     // суммарная длина дыр короче q (непригодных для труб длины >= q)
@@ -117,72 +165,30 @@ struct HoleSet {
         for (int sI = 1; sI < q && sI < 40; sI++) u += (long long)sI * cnt[sI];
         return u;
     }
-    // кандидат по правилу; maxSize ограничивает размер дыры (для P-труб в T-дырах). false — нет подходящей.
-    // h == -1 в ответе: большая дыра (>= 40), длину уточняет вызывающий.
-    bool pick(Sel sel, bool tieHigh, int L, int maxSize, int& a, int& h, int th = 0) const {
-        uint64_t mm = mask & (~0ull << L);
-        if (maxSize < 40) mm &= (2ull << maxSize) - 1;
-        else if ((mm >> 40 & 1) && maxSize < (1 << 30) && big.begin()->first > maxSize) mm &= ~(1ull << 40);
-        if (!mm) return false;
-        switch (sel) {
-        case BEST: {
-            int s = ctz64(mm);
-            if (s < 40) { a = tieHigh ? *sz[s].rbegin() : *sz[s].begin(); h = s; }
-            else {
-                auto it = big.begin();
-                if (tieHigh) { it = big.upper_bound({it->first, 0x7fffffff}); --it; }
-                a = it->second; h = it->first;
-            }
-            return true;
-        }
-        case FIRST:
-        case LAST: {
-            bool first = sel == FIRST;
-            int best = first ? 0x7fffffff : -1, bh = 0;
-            for (uint64_t m = mm & ((1ull << 40) - 1); m; m &= m - 1) {
-                int s = ctz64(m);
-                int x = first ? *sz[s].begin() : *sz[s].rbegin();
-                if (first ? x < best : x > best) { best = x; bh = s; }
-            }
-            if (mm >> 40 & 1) {
-                int x = first ? *bigAddr.begin() : *bigAddr.rbegin();
-                if (first ? x < best : x > best) { best = x; bh = -1; }
-            }
-            a = best; h = bh;
-            return true;
-        }
-        case WORST:
-            if (mm >> 40 & 1) { a = big.rbegin()->second; h = big.rbegin()->first; }
-            else { int s = clz64idx(mm); a = *sz[s].begin(); h = s; }
-            return true;
-        case TFIT: {
-            if (L < 40 && (mask >> L & 1) && L <= maxSize) { a = *sz[L].begin(); h = L; return true; }
-            uint64_t hi = (L + th < 64) ? (mm & (~0ull << (L + th))) : 0;
-            int s;
-            if (hi) s = ctz64(hi);
-            else s = clz64idx(mm);   // нет «хороших» остатков: берём наибольшую дыру из имеющихся (остаток < th)
-            if (s < 40) { a = *sz[s].begin(); h = s; }
-            else { a = big.begin()->second; h = big.begin()->first; }
-            return true;
-        }
-        case EXACTWORST:
-            if (L < 40 && (mask >> L & 1) && L <= maxSize) { a = *sz[L].begin(); h = L; return true; }
-            if (mm >> 40 & 1) { a = big.rbegin()->second; h = big.rbegin()->first; }
-            else { int s = clz64idx(mm); a = *sz[s].begin(); h = s; }
-            return true;
-        }
-        return false;
-    }
 };
+
+// ---------------------------------------------------------------- политики: выбор дыры
+
+// наименьший адрес актуальной дыры длины s в наборе hs (tg — тег набора); очищает устаревшие верхушки кучи
+static inline int topAddr(HoleSet& hs, const HTab& st, int s, int tg) {
+    std::vector<int>& hp = hs.heap[s];
+    for (;;) {
+        int a = hp.front();
+        int i = st.find(a);
+        if (i >= 0 && st.val[i] == s && st.tag[i] == tg) return a;
+        std::pop_heap(hp.begin(), hp.end(), std::greater<int>());
+        hp.pop_back();
+    }
+}
 
 // ---------------------------------------------------------------- состояние траншеи
 
 struct Alloc {
     int trench = 0;      // длина траншеи
     int tailStart = 0;   // начало свободного хвоста (хвост = [tailStart, trench))
-    struct HV { int len; int tag; };
-    std::map<int, HV> byAddr;             // свободные дыры внутри траншеи (не касаются конца): начало -> (длина, тег)
-    HoleSet hs[2];                        // 0 — обычные (U), 1 — арены/дыры скоротечных (T)
+    HTab startTab;       // дыры по началу: начало -> (длина, тег); дыры внутри траншеи, не касаются конца
+    HTab endTab;         // дыры по концу: конец -> длина
+    HoleSet hs[2];       // 0 — обычные (U), 1 — арены/дыры скоротечных (T)
     std::vector<int> pos, len;            // по PID (с 1)
     std::vector<uint8_t> cls;             // класс трубы: 0 = P (обычная), 1 = T (скоротечная)
     long long live = 0;
@@ -191,13 +197,18 @@ struct Alloc {
 
     Alloc() { pos.assign(1, -1); len.assign(1, 0); cls.assign(1, 0); }
 
-    void addHole(int a, int h, int tag) { byAddr[a] = {h, tag}; hs[tag].add(a, h); }
+    void addHole(int a, int h, int tag) { startTab.put(a, h, tag); endTab.put(a + h, h, 0); hs[tag].add(a, h); }
     void delHole(int a) {
-        auto it = byAddr.find(a);
-        hs[it->second.tag].del(a, it->second.len);
-        byAddr.erase(it);
+        int i = startTab.find(a);
+        int h = startTab.val[i], tg = startTab.tag[i];
+        hs[tg].del(a, h);
+        endTab.erase(a + h);
+        startTab.erase(a);
     }
-    int holeLen(int a) const { return byAddr.find(a)->second.len; }
+    int holeLen(int a) const { return startTab.val[startTab.find(a)]; }
+    template <class F> void forEachHole(F f) const {   // f(начало, длина, тег)
+        for (unsigned i = 0; i < startTab.cap; i++) if (startTab.key[i] != -1) f(startTab.key[i], startTab.val[i], (int)startTab.tag[i]);
+    }
 
     // вырезать [D, D+L) из дыры (a, h, tag)
     void carve(int a, int h, int tag, int D, int L) {
@@ -205,7 +216,60 @@ struct Alloc {
         if (D > a) addHole(a, D - a, tag);
         if (D + L < a + h) addHole(D + L, a + h - (D + L), tag);
     }
-    void commit(int D, int L, int c) { pos.push_back(D); len.push_back(L); cls.push_back((uint8_t)c); live += L; if (c) { liveT += L; emaT = emaT == 0 ? L : emaT * 0.9 + L * 0.1; } }
+    void commit(int D, int L, int c) {
+        pos.push_back(D); len.push_back(L); cls.push_back((uint8_t)c); live += L;
+        if (c) { liveT += L; emaT = emaT == 0 ? L : emaT * 0.9 + L * 0.1; }
+    }
+
+    // кандидат из набора tg по правилу; maxSize ограничивает размер дыры. false — нет подходящей. h получает длину дыры.
+    bool pick(int tg, Sel sel, int L, int maxSize, int th, int& a, int& h) {
+        HoleSet& H = hs[tg];
+        uint64_t mm = H.mask & (~0ull << L);
+        if (maxSize < 40) mm &= (2ull << maxSize) - 1;
+        else if ((mm >> 40 & 1) && maxSize < (1 << 30) && H.big.begin()->first > maxSize) mm &= ~(1ull << 40);
+        if (!mm) return false;
+        switch (sel) {
+        case BEST: {
+            int s = ctz64(mm);
+            if (s < 40) { a = topAddr(H, startTab, s, tg); h = s; }
+            else { a = H.big.begin()->second; h = H.big.begin()->first; }
+            return true;
+        }
+        case FIRST: {
+            int best = 0x7fffffff, bh = 0;
+            for (uint64_t m = mm & ((1ull << 40) - 1); m; m &= m - 1) {
+                int s = ctz64(m);
+                int x = topAddr(H, startTab, s, tg);
+                if (x < best) { best = x; bh = s; }
+            }
+            if (mm >> 40 & 1) {
+                int x = *H.bigAddr.begin();
+                if (x < best) { best = x; bh = holeLen(x); }
+            }
+            a = best; h = bh;
+            return true;
+        }
+        case WORST:
+            if (mm >> 40 & 1) { a = H.big.rbegin()->second; h = H.big.rbegin()->first; }
+            else { int s = clz64idx(mm); a = topAddr(H, startTab, s, tg); h = s; }
+            return true;
+        case EXACTWORST:
+            if (L < 40 && (H.mask >> L & 1) && L <= maxSize) { a = topAddr(H, startTab, L, tg); h = L; return true; }
+            if (mm >> 40 & 1) { a = H.big.rbegin()->second; h = H.big.rbegin()->first; }
+            else { int s = clz64idx(mm); a = topAddr(H, startTab, s, tg); h = s; }
+            return true;
+        case TFIT: {
+            if (L < 40 && (H.mask >> L & 1) && L <= maxSize) { a = topAddr(H, startTab, L, tg); h = L; return true; }
+            uint64_t hi = (L + th < 64) ? (mm & (~0ull << (L + th))) : 0;
+            int s = hi ? ctz64(hi) : clz64idx(mm);
+            if (s < 40) { a = topAddr(H, startTab, s, tg); h = s; }
+            else { a = H.big.begin()->second; h = H.big.begin()->first; }
+            return true;
+        }
+        default: break;
+        }
+        return false;
+    }
 
     // уложить трубу длины L класса c; возвращает N (докопка в 20-метровых сегментах) и D (позиция)
     void place(const Pol& p, int L, int c, int& N, int& D) {
@@ -213,10 +277,8 @@ struct Alloc {
         int a, h;
         if (c == 1) {  // скоротечная: best fit по T-дырам (и, если разрешено, по U-дырам), иначе новый чанк в хвосте
             int a1 = 0, h1 = 0, a0 = 0, h0 = 0;
-            bool f1 = hs[1].pick(BEST, false, L, 1 << 30, a1, h1);
-            bool f0 = p.tuU && hs[0].pick(BEST, false, L, 1 << 30, a0, h0);
-            if (f1 && h1 < 0) h1 = holeLen(a1);
-            if (f0 && h0 < 0) h0 = holeLen(a0);
+            bool f1 = pick(1, BEST, L, 1 << 30, 0, a1, h1);
+            bool f0 = p.tuU && pick(0, BEST, L, 1 << 30, 0, a0, h0);
             if (f1 || f0) {
                 bool useT = f1 && (!f0 || h1 <= h0);
                 a = useT ? a1 : a0; h = useT ? h1 : h0;
@@ -238,19 +300,16 @@ struct Alloc {
         }
         // P: кандидаты из U-дыр и малых T-дыр
         int a0 = 0, h0 = 0, a1 = 0, h1 = 0;
-        bool f0 = hs[0].pick(p.sel, p.tieHigh, L, 1 << 30, a0, h0, p.th);
-        bool f1 = hs[1].pick(p.sel, p.tieHigh, L, p.js >= 0 ? p.Tsmall : (1 << 30), a1, h1, p.th);   // политики без арен видят T-дыры как обычные
-        if (f0 && h0 < 0) h0 = holeLen(a0);
-        if (f1 && h1 < 0) h1 = holeLen(a1);
+        bool f0 = pick(0, p.sel, L, 1 << 30, p.th, a0, h0);
+        bool f1 = pick(1, p.sel, L, p.js >= 0 ? p.Tsmall : (1 << 30), p.th, a1, h1);   // политики без арен видят T-дыры как обычные
         if (f0 || f1) {
             bool useT;
             if (!f1) useT = false;
             else if (!f0) useT = true;
             else {
                 switch (p.sel) {
-                case BEST: useT = h1 < h0 || (h1 == h0 && (p.tieHigh ? a1 > a0 : a1 < a0)); break;
+                case BEST: useT = h1 < h0 || (h1 == h0 && a1 < a0); break;
                 case FIRST: useT = a1 < a0; break;
-                case LAST: useT = a1 > a0; break;
                 default: useT = h1 > h0; break;
                 }
             }
@@ -274,16 +333,19 @@ struct Alloc {
         live -= l;
         if (cls[pid]) liveT -= l;
         int s = p, e = p + l;
-        auto it = byAddr.lower_bound(p);
-        if (it != byAddr.begin()) {
-            auto jt = std::prev(it);
-            if (jt->first + jt->second.len == p) { s = jt->first; tag = std::max(tag, jt->second.tag); delHole(jt->first); }
+        int li = endTab.find(p);   // дыра, заканчивающаяся в p
+        if (li >= 0) {
+            int hl = endTab.val[li];
+            int st = p - hl;
+            tag = std::max(tag, (int)startTab.tag[startTab.find(st)]);
+            s = st;
+            delHole(st);
         }
         if (e == tailStart) {
             tailStart = s;
         } else {
-            auto r = byAddr.find(e);
-            if (r != byAddr.end()) { tag = std::max(tag, r->second.tag); e += r->second.len; delHole(r->first); }
+            int ri = startTab.find(e);   // дыра, начинающаяся в e
+            if (ri >= 0) { tag = std::max(tag, (int)startTab.tag[ri]); int hl = startTab.val[ri]; delHole(e); e += hl; }
             addHole(s, e - s, tag);
         }
         return p;
@@ -535,8 +597,11 @@ static void writeInts(int a, int b, bool two) {
     fwrite(buf, 1, n, stdout);
     fflush(stdout);
 }
+#ifndef FIXED_POL
+#define FIXED_POL -1
+#endif
 int main() {
-    Engine eng(-1);
+    Engine eng(FIXED_POL);
     int c;
     while (readInt(c)) {
         if (c == 0) return 0;
