@@ -58,9 +58,13 @@ static inline int clz64idx(uint64_t x) {  // индекс старшего би�
 #endif
 }
 
+#ifndef LEAN_PER_CMD
+#define LEAN_PER_CMD 21e-6   // порог CPU на команду для аварийного режима: 5 с / 200000 = 25 мкс, берём запас
+#endif
+
 // ---------------------------------------------------------------- политики
 
-enum Sel { BEST, FIRST, LAST_UNUSED, WORST, EXACTWORST, TFIT, SCORED, WFN };   // LAST убран (кучи хранят только минимальный адрес)
+enum Sel { BEST, FIRST, LAST_UNUSED, WORST, EXACTWORST, TFIT, SCORED, WFN, XFIRST };   // LAST убран (кучи хранят только минимальный адрес)
 
 struct Pol {
     const char* name;
@@ -242,6 +246,9 @@ struct Alloc {
             else { a = H.big.begin()->second; h = H.big.begin()->first; }
             return true;
         }
+        case XFIRST:
+            if (L < 40 && (H.mask >> L & 1) && L <= maxSize) { a = topAddr(H, startTab, L, tg); h = L; return true; }
+            /* fallthrough */
         case FIRST: {
             int best = 0x7fffffff, bh = 0;
             for (uint64_t m = mm & ((1ull << 40) - 1); m; m &= m - 1) {
@@ -584,7 +591,7 @@ struct Engine {
     int cmds = 0;
     int startIdx = 0;
     bool lean = false;       // аварийный режим: теней и предсказателя нет, реальная траншея ведётся одной политикой
-    double leanPerCmd = 21e-6;   // порог CPU на команду: 5 с / 200000 = 25 мкс, берём запас
+    double leanPerCmd = LEAN_PER_CMD;   // порог CPU на команду: 5 с / 200000 = 25 мкс, берём запас
 
     explicit Engine(int p = -1) : fixed(p) {
         for (int i = 0; i <= WMAX; i++) Wtab[i] = i;

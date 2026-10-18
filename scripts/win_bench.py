@@ -31,6 +31,19 @@ def cpu_seconds(handle):
     return t(k) + t(u)
 
 
+class PMC(ctypes.Structure):
+    _fields_ = [("cb", wt.DWORD), ("PageFaultCount", wt.DWORD), ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+
+
+def peak_mb(handle):
+    c = PMC(); c.cb = ctypes.sizeof(PMC)
+    ok = ctypes.windll.psapi.GetProcessMemoryInfo(wt.HANDLE(int(handle)), ctypes.byref(c), c.cb)
+    return c.PeakWorkingSetSize / 2**20 if ok else -1.0
+
+
 def run_one(exe, test, timeout):
     with tempfile.TemporaryDirectory() as d:
         score, ans, rep = (os.path.join(d, x) for x in ("score.txt", "answer.txt", "report.txt"))
@@ -43,8 +56,9 @@ def run_one(exe, test, timeout):
                 sp.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 sp.kill(); ip.kill()
-                return 0.0, timeout, "TIMEOUT"
+                return 0.0, timeout, "TIMEOUT", 0.0
             cpu = cpu_seconds(sp._handle)
+            mem = peak_mb(sp._handle)
             try:
                 ip.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -52,7 +66,7 @@ def run_one(exe, test, timeout):
             err = ip.stderr.read().decode("utf-8", "replace") if ip.stderr else ""
             ip.stdin.close() if ip.stdin and not ip.stdin.closed else None
         except Exception as ex:  # noqa: BLE001
-            return 0.0, 0.0, f"ERR {ex}"
+            return 0.0, 0.0, f"ERR {ex}", 0.0
         try:
             sc = float(open(score).readline())
         except Exception:  # noqa: BLE001
@@ -60,7 +74,7 @@ def run_one(exe, test, timeout):
         m = re.search(r"Score = (\d+)/(\d+)", err)
         msg = err.strip().splitlines()[-1] if err.strip() else ""
         kpi = (int(m.group(1)) / int(m.group(2))) if m else 0.0
-        return kpi if sc > 0 else 0.0, cpu, msg
+        return kpi if sc > 0 else 0.0, cpu, msg, mem
 
 
 def main():
@@ -87,8 +101,8 @@ def main():
         maxcpu = max(r[1] for r in res)
         if a.v:
             for f, r, w in zip(files, res, weights):
-                print(f"  {os.path.basename(f):8s} w={w:<4g} kpi={r[0]:.4f} cpu={r[1]:.2f}s {r[2] if r[0] == 0 else ''}")
-        print(f"{name:16s} {'sum' if weighted else 'avg'}={tot if weighted else tot / len(files):.4f}  maxcpu={maxcpu:.2f}s  failures={len(bad)} {bad[:3] if bad else ''}")
+                print(f"  {os.path.basename(f):8s} w={w:<4g} kpi={r[0]:.4f} cpu={r[1]:.2f}s mem={r[3]:.0f}MB {r[2] if r[0] == 0 else ''}")
+        print(f"{name:16s} {'sum' if weighted else 'avg'}={tot if weighted else tot / len(files):.4f}  maxcpu={maxcpu:.2f}s  maxmem={max(r[3] for r in res):.0f}MB  failures={len(bad)} {bad[:3] if bad else ''}")
 
 
 if __name__ == "__main__":

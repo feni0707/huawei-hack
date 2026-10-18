@@ -187,14 +187,18 @@ int main(int argc, char** argv) {
             while (std::getline(pf, line)) {   // 12 чисел после имени + необязательный tau*100
                 std::istringstream is(line);
                 std::string nm;
-                int v[14] = {0};
+                int v[18] = {0};
                 if (!(is >> nm)) continue;
                 int cnt = 0;
-                while (cnt < 14 && (is >> v[cnt])) cnt++;
+                while (cnt < 18 && (is >> v[cnt])) cnt++;
                 if (cnt < 12) continue;
                 names.push_back(nm);
                 Pol pp = {names.back().c_str(), (Sel)v[0], (bool)v[1], (bool)v[2], (bool)v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11]};
                 if (cnt >= 13) pp.tau = (float)v[12] / 100.0f;
+                if (cnt >= 14) pp.sw0 = (float)v[13] / 100.0f;
+                if (cnt >= 15) pp.swsmall = (float)v[14] / 100.0f;
+                if (cnt >= 16) pp.swsize = (float)v[15] / 100.0f;
+                if (cnt >= 17) pp.wkap = (float)v[16] / 100.0f;
                 POLS.push_back(pp);
             }
         }
