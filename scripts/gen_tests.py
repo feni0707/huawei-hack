@@ -326,6 +326,53 @@ def gen_stress(rng, n):
     return b.cmds
 
 
+def gen_lifo_mix(rng, n):
+    """Ближе к 8/13/12, чем alternating: длины идут не сериями, а ЦИКЛОМ из 2–3 ходовых длин (5 10 5 10 …),
+    фазы со своим циклом (бывают «одна длина» и «лесенка»); после укладки с вероятностью p_del удаляется
+    живая труба с рангом r с конца списка живых (своё распределение рангов 0..K на тест) или изредка — старая."""
+    p_del = rng.choice([0.9, 0.9, 0.92, 0.94, 0.88, 0.33])
+    K = rng.randint(2, 12)
+    rw = [rng.expovariate(1.0) * (0.8 ** r if rng.random() < 0.5 else 1.0) for r in range(K + 1)]
+    p_old = rng.uniform(0.005, 0.04)
+    p_noise = rng.uniform(0.01, 0.07)
+    base = [5, 10, 16] if rng.random() < 0.5 else sorted(rng.sample(range(3, 25), 3))
+    b = Builder(n)
+    pool = Pool(n)
+
+    def new_phase():
+        kind = rng.random()
+        if kind < 0.1:
+            return [rng.choice(base)] * 1, rng.randint(150, 400)
+        if kind < 0.18:
+            st = rng.randint(3, 8)
+            return [L for L in range(st, st + rng.randint(4, 10)) for _ in range(rng.randint(2, 12))], None
+        k = rng.choice([2, 2, 3])
+        cyc = rng.sample(base, k) if rng.random() < 0.8 else [rng.randint(3, 25) for _ in range(k)]
+        return cyc, rng.randint(300, 1500)
+
+    cyc, left = new_phase()
+    ci = 0
+    while b.room():
+        if b.alive and b.cmds[-1] > 0 and rng.random() < p_del:
+            if rng.random() < p_old:
+                r = rng.randrange(pool.size)
+            else:
+                r = rng.choices(range(K + 1), rw)[0]
+            p = pool.from_end(r)
+            pool.add(p, -1)
+            b.remove(p)
+            continue
+        if left is None and ci >= len(cyc) or left is not None and left <= 0:
+            cyc, left = new_phase()
+            ci = 0
+        L = rng.randint(1, 39) if rng.random() < p_noise else cyc[ci % len(cyc)]
+        ci += 1
+        if left is not None:
+            left -= 1
+        pool.add(b.place(L), 1)
+    return b.cmds
+
+
 CLASSES = {
     "sorted_groups": (gen_sorted_groups, [2000, 7500, 9000]),
     "alternating": (gen_alternating, [1500, 6500, 10000]),
@@ -335,7 +382,7 @@ CLASSES = {
     "two_phase": (gen_two_phase, [10000, 50000, 200000]),
 }
 # Не входит в 'all' (большие файлы): python3 scripts/gen_tests.py --class stress --count 3
-EXTRA = {"stress": (gen_stress, [200000])}
+EXTRA = {"stress": (gen_stress, [200000]), "lifo_mix": (gen_lifo_mix, [1500, 6500, 10000])}
 
 
 def validate(cmds):
