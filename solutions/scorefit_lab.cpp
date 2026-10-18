@@ -28,7 +28,8 @@ typedef long long ll;
 // P33=1 — правило P15 только вне потоков, P33=2 — промежутки с мёртвым остатком ≥ P15 исключаются из кандидатов (вне потоков); P36 — мин. доля редкого значения признака для каппы;
 // P39 — штраф замуровывания, только если s + len(соседа) встречается среди недавних укладок с долей ≥ P39
 static double P[48] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.5, 2, 0, 3, 60, 0, 4, 0, 3, 4, 0,
-                       400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 2, 0, 0, 0.3, 0, 0.99, 0.05};
+                       400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 2, 0, 0, 0.3, 0, 0.99, 0.05,
+                       0, 0, 0, 0, 1};
 
 // ---------------------------------------------------------------- аллокатор
 // Свободные промежутки: граничные метки (склейка за O(1)) + корзины по точной длине (< NB) + set для больших.
@@ -141,7 +142,7 @@ struct Alloc {
     std::vector<unsigned char> feat;  // биты признаков при рождении: bit0 — чётность индекса в серии равных длин, bit1 — чётность PID
     int runIdx = 0, lastL = 0, curRun = 0;
     std::vector<int> runOf;           // номер серии равных длин по PID
-    static const int NF = 2;
+    static const int NF = 5;   // + bit2..4: индекс в серии mod 3 == 0 / 1 / 2
     double coSame[NF] = {0}, coTot[NF] = {0};   // соседние удаления в пачке: совпал ли признак
     double birthV[NF][2] = {{0}}, deathV[NF][2] = {{0}};
     int lastDelPid = 0; bool lastWasDel = false;
@@ -254,7 +255,7 @@ struct Alloc {
         if (L == lastL) runIdx++; else { runIdx = 0; curRun++; }
         runOf.push_back(curRun);
         lastL = L;
-        feat.push_back((unsigned char)((runIdx & 1) | ((pid & 1) << 1)));
+        feat.push_back((unsigned char)((runIdx & 1) | ((pid & 1) << 1) | (P[44] ? (1 << (2 + runIdx % 3)) : 0)));
         int st = chooseStream(pid, L);
         stream.push_back((signed char)st);
         bVol = bVol * P[27] + (st == 1 ? L : 0);

@@ -8,7 +8,8 @@
 //      Хвост траншеи (промежуток, упирающийся в конец) — в последнюю очередь; докопка минимальная.
 //   2. Остаток в промежутке оставляем рядом с более молодым соседом (он скорее умрёт, и остаток сольётся).
 //   3. Потоки. Онлайн ищем признак, носители одного значения которого умирают вместе (каппа совпадения
-//      признака у соседних удалений пачки). Признаки: чётность индекса в серии равных длин, чётность PID.
+//      признака у соседних удалений пачки). Признаки: чётность индекса в серии равных длин, чётность PID,
+//      «индекс в серии mod 3 = k».
 //      Если нашёлся — поток A кладём к левому краю «граничного» промежутка, поток B растёт влево от правой
 //      границы роста F (участками по 400 м). Какая бы половина ни умерла, освобождается сплошной кусок.
 //      Если прогноз «B умирает чаще» подтвердился на помеченных трубах, B идёт сразу к границе роста.
@@ -93,7 +94,10 @@ struct Alloc {
     Heap bucket[NB], big;
 
     std::vector<int> pos, len;           // по PID
-    std::vector<unsigned char> feat;     // bit0 — чётность индекса в серии равных длин, bit1 — чётность PID
+    // признаки при рождении: bit0 — чётность индекса в серии равных длин, bit1 — чётность PID,
+    // bit2/3/4 — индекс в серии mod 3 равен 0/1/2
+    static const int NF = 5;
+    std::vector<unsigned char> feat;
     std::vector<signed char> stream;     // -1 — вне потоков, 0 — A, 1 — B
 
     // статистика длин укладок (с затуханием) — для «минимальной ожидаемой длины»
@@ -107,8 +111,8 @@ struct Alloc {
     // потоки
     int F = 0;                           // правая граница роста потока B; F == T — обычный режим
     int runIdx = 0, lastL = 0;
-    double coSame[2], coTot[2];          // соседние удаления в пачке: совпал ли признак (с затуханием)
-    double birthV[2][2], deathV[2][2];   // рождения и смерти по значению признака (с затуханием)
+    double coSame[NF], coTot[NF];        // соседние удаления в пачке: совпал ли признак (с затуханием)
+    double birthV[NF][2], deathV[NF][2]; // рождения и смерти по значению признака (с затуханием)
     int curFeat = -1;
     double bornLab[2], diedLab[2];       // проверка прогноза: рождения и смерти среди помеченных A/B
     int lastDelPid = 0; bool lastWasDel = false;
@@ -116,8 +120,9 @@ struct Alloc {
     Alloc() {
         pos.push_back(-1); len.push_back(0); feat.push_back(0); stream.push_back(-1);
         for (int l = 0; l <= MAXL; l++) { cnt[l] = birthL[l] = deathL[l] = recDel[l] = 0; aliveCntL[l] = 0; }
-        for (int f = 0; f < 2; f++) {
-            coSame[f] = coTot[f] = 0; bornLab[f] = diedLab[f] = 0;
+        bornLab[0] = bornLab[1] = diedLab[0] = diedLab[1] = 0;
+        for (int f = 0; f < NF; f++) {
+            coSame[f] = coTot[f] = 0;
             for (int v = 0; v < 2; v++) birthV[f][v] = deathV[f][v] = 0;
         }
         ensure(1024);
@@ -214,7 +219,7 @@ struct Alloc {
     int chooseStream(int pid) {
         // признак с каппой ≥ 0.6; при нескольких — где сильнее разница p_die; текущий меняем только с запасом
         int bf = -1; double bs = -1, cs = -1;
-        for (int f = 0; f < 2; f++) {
+        for (int f = 0; f < NF; f++) {
             double k = kappa(f);
             if (k < 0.6) continue;
             double s = k + dabs(pdie(f, 0) - pdie(f, 1));
@@ -272,11 +277,11 @@ struct Alloc {
         int pid = (int)pos.size();
         if (L == lastL) runIdx++; else runIdx = 0;
         lastL = L;
-        feat.push_back((unsigned char)((runIdx & 1) | ((pid & 1) << 1)));
+        feat.push_back((unsigned char)((runIdx & 1) | ((pid & 1) << 1) | (1 << (2 + runIdx % 3))));
         int st = chooseStream(pid);
         stream.push_back((signed char)st);
         if (st >= 0) bornLab[st] += 1;
-        for (int f = 0; f < 2; f++) {
+        for (int f = 0; f < NF; f++) {
             birthV[f][0] *= 0.999; birthV[f][1] *= 0.999;
             deathV[f][0] *= 0.999; deathV[f][1] *= 0.999;
             birthV[f][(feat[pid] >> f) & 1] += 1;
@@ -356,7 +361,7 @@ struct Alloc {
         int e = freeRange(d, l);
         if (d == F) F = e;
         if (stream[pid] >= 0) diedLab[stream[pid]] += 1;
-        for (int f = 0; f < 2; f++) {
+        for (int f = 0; f < NF; f++) {
             int v = (feat[pid] >> f) & 1;
             deathV[f][v] += 1;
             if (lastWasDel) {
