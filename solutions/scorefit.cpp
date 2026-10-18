@@ -23,7 +23,7 @@ typedef long long ll;
 // P21 мин. число пар удалений для включения, P22 порог каппы, P23 затухание рождений, P24 затухание пар
 // P15 мёртвый остаток >= P15 — в хвост (0 выкл), P16 штраф мёртвого остатка с учётом риска смерти соседей
 //      0  1      2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19
-static double P[32] = {0.999, 0.002, 0, 0, 4, 0, 1, 0, 4, 0, 2, 0, 0, 0, 0, 0, 3, 0, 0, 0,
+static double P[32] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                        400, 20, 0.6, 0.999, 0.998};
 
 // ---------------------------------------------------------------- аллокатор
@@ -126,11 +126,13 @@ struct Alloc {
     int F = 0;                        // правая граница роста; F == T — обычный режим
     double bVol = 0;                  // затухающий объём укладок потока B (для размера участка)
     std::vector<unsigned char> feat;  // биты признаков при рождении: bit0 — чётность индекса в серии равных длин, bit1 — чётность PID
-    int runIdx = 0, lastL = 0;
+    int runIdx = 0, lastL = 0, curRun = 0;
+    std::vector<int> runOf;           // номер серии равных длин по PID
     static const int NF = 2;
     double coSame[NF] = {0}, coTot[NF] = {0};   // соседние удаления в пачке: совпал ли признак
     double birthV[NF][2] = {{0}}, deathV[NF][2] = {{0}};
     int lastDelPid = 0; bool lastWasDel = false;
+    int curFeat = -1;
     // ---- риск смерти соседа по возрасту
     // aliveBit — дерево Фенвика по PID (живые), deathAge[b] — число смертей в возрасте [2^b-1, 2^(b+1)-1)
     std::vector<int> aliveBit;
@@ -171,14 +173,18 @@ struct Alloc {
         }
         if (P[10] != 2) return -1;
         // признак: каппа «умирают вместе» выше порога; при равенстве — тот, где сильнее разница p_die
-        int bf = -1; double bs = -1;
+        // гистерезис: текущий признак меняем, только если другой лучше с запасом
+        int bf = -1; double bs = -1, cs = -1;
         for (int f = 0; f < NF; f++) {
             double k = kappa(f);
             if (k < P[22]) continue;
             double s = k + std::fabs(pdie(f, 0) - pdie(f, 1));
+            if (f == curFeat) cs = s;
             if (s > bs) { bs = s; bf = f; }
         }
-        if (bf < 0) return -1;
+        if (bf < 0) { curFeat = -1; return -1; }
+        if (cs >= 0 && bs < cs + 0.2) bf = curFeat;
+        curFeat = bf;
         int v = (fv >> bf) & 1;
         // тот, кто умирает чаще, — в поток B (правый край, у границы роста)
         double pv = pdie(bf, v), po = pdie(bf, v ^ 1);
@@ -186,12 +192,19 @@ struct Alloc {
         return pv > po ? 1 : 0;
     }
 
+    bool kin(int p, int st) const { return p > 0 && stream[p] == st && runOf[p] == curRun; }
+
     // положить в промежуток gs длины s: выбрать сторону, вернуть D
     int chooseSide(int gs, int s, int L, int st) {
         int r = s - L;
         if (r == 0) return gs;
         int lp = pidEndAt[gs], rp = pidStartAt[gs + s];
         if (st >= 0) {
+            if (P[29] != 0) {
+                bool kl = kin(lp, st), kr = kin(rp, st);
+                if (kl && !kr) return gs;
+                if (kr && !kl) return gs + r;
+            }
             // прижимаем к соседу из того же потока
             int lc = lp ? stream[lp] : -2, rc = rp ? stream[rp] : -2;
             if (lc == st && rc != st) return gs;
@@ -207,7 +220,8 @@ struct Alloc {
     std::pair<ll,ll> place(int L) {
         int m = minRecent();
         int pid = (int)pos.size();
-        if (L == lastL) runIdx++; else runIdx = 0;
+        if (L == lastL) runIdx++; else { runIdx = 0; curRun++; }
+        runOf.push_back(curRun);
         lastL = L;
         feat.push_back((unsigned char)((runIdx & 1) | ((pid & 1) << 1)));
         int st = chooseStream(pid, L);
@@ -219,6 +233,7 @@ struct Alloc {
 #endif
         for (int f = 0; f < NF; f++) {
             birthV[f][0] *= P[23]; birthV[f][1] *= P[23];
+            deathV[f][0] *= P[23]; deathV[f][1] *= P[23];
             birthV[f][(feat[pid] >> f) & 1] += 1;
         }
         if (F > T) F = (int)T;
@@ -243,7 +258,8 @@ struct Alloc {
                 cst = s == L ? -P[5] : fragCost(s - L, m) + P[6] * (s - L);
                 if (P[17] != 0 && s == L) {
                     // точное попадание «замуровывает» дыру у соседа, который скоро умрёт (дыра бы выросла)
-                    cst += P[17] * std::max(hz2(pidEndAt[gs]), hz2(pidStartAt[gs + s]));
+                    double h = std::max(hz2(pidEndAt[gs]), hz2(pidStartAt[gs + s]));
+                    if (h >= P[28]) cst += P[17] * h;
                 }
                 if (P[16] != 0 && s > L && s - L < m) {
                     // мёртвый остаток оживёт, только если умрёт сосед: штраф ~ r * P(оба соседа выживут)
@@ -251,6 +267,7 @@ struct Alloc {
                     cst += P[16] * (s - L) * (1 - std::max(hl, hr));
                 }
             }
+            if (P[29] != 0 && st >= 0 && (kin(pidEndAt[gs], st) || kin(pidStartAt[gs + s], st))) cst -= P[29];
             if (cst < bestC) { bestC = cst; bgs = gs; bs = s; }
         };
         for (int s = L; s < NB; s++) {
@@ -313,6 +330,10 @@ struct Alloc {
                 F = st == 1 ? D : (int)T;
             }
         }
+#ifdef SIM
+        if (getenv("SFPL") && pid >= atoi(getenv("SFPL")) && pid < atoi(getenv("SFPL")) + 30)
+            fprintf(stderr, "place pid=%d L=%d st=%d D=%d N=%lld gap=%s bs=%d F=%d T=%lld\n", pid, L, st, D, N, useGap ? "hole" : "front", bs, F, T);
+#endif
         pidStartAt[D] = pid; pidEndAt[D + L] = pid;
         pos.push_back(D); len.push_back(L); alive.push_back(1); birthL[L] += 1;
         if ((int)aliveBit.size() <= pid) aliveBit.resize(std::max<size_t>(pid + 1, aliveBit.size() * 2 + 16), 0), rebuildBit();
@@ -352,7 +373,7 @@ struct Alloc {
         for (int s = 1; s < NB; s++) for (int g : bucket[s]) if (g != ts) { holes += s; if (s < 8) small += s; }
         for (auto& g : big) if (g.second != ts) holes += g.first;
     }
-    Alloc() { pos.push_back(-1); len.push_back(0); feat.push_back(0); stream.push_back(-1); alive.push_back(0); ensure(1024); }
+    Alloc() { pos.push_back(-1); len.push_back(0); feat.push_back(0); stream.push_back(-1); alive.push_back(0); runOf.push_back(-1); ensure(1024); }
 };
 
 #ifdef SIM
