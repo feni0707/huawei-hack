@@ -79,7 +79,7 @@ static bool DUMP = false;
 static bool TRACE = false;
 static void dumpHoles(const Alloc& a) {
     long long cnt[41] = {0}, cells[41] = {0};
-    for (auto& kv : a.byAddr) { int h = std::min(kv.second, 40); cnt[h]++; cells[h] += kv.second; }
+    for (auto& kv : a.byAddr) { int h = std::min(kv.second.len, 40); cnt[h]++; cells[h] += kv.second.len; }
     long long tot = 0;
     printf("   holes (size: count/cells):");
     for (int h = 1; h <= 40; h++) if (cnt[h]) { printf(" %d%s:%lld/%lld", h, h == 40 ? "+" : "", cnt[h], cells[h]); tot += cells[h]; }
@@ -97,7 +97,7 @@ static Result run(const Test& t, F makeEngine) {
         ci++;
         if (TRACE && ci % (t.cmds.size() / 20) == 0) {
             long long hc = 0, small = 0, nh = 0;
-            for (auto& kv : eng->real.byAddr) { hc += kv.second; nh++; if (kv.second <= 7) small += kv.second; }
+            for (auto& kv : eng->real.byAddr) { hc += kv.second.len; nh++; if (kv.second.len <= 7) small += kv.second.len; }
             printf("   t=%zu trench=%d live=%lld holes=%lld (%.2f%%) nholes=%lld small<=7:%lld tail=%d\n", ci, eng->real.trench, eng->real.live, hc, 100.0 * hc / eng->real.trench, nh, small, eng->real.trench - eng->real.tailStart);
         }
         if (c > 0) {
@@ -118,27 +118,6 @@ static Result run(const Test& t, F makeEngine) {
     return r;
 }
 
-// Эксперимент «оракул»: политика зависит от истинного оставшегося времени жизни трубы.
-static Result runOracle(const Test& t, int polOld, int polYoung, int T) {
-    Result r;
-    int np = 0;
-    for (int c : t.cmds) if (c > 0) np++;
-    std::vector<int> death(np + 2, 1 << 30);
-    for (size_t i = 0; i < t.cmds.size(); i++) if (t.cmds[i] < 0) death[-t.cmds[i]] = (int)i;
-    Alloc a;
-    for (size_t i = 0; i < t.cmds.size(); i++) {
-        int c = t.cmds[i];
-        if (c > 0) {
-            int pid = (int)a.pos.size();
-            int life = death[pid] - (int)i;
-            int N, D;
-            a.place(POLS[life > T ? polOld : polYoung], c, N, D);
-        } else a.remove(-c);
-    }
-    r.trench = a.trench; r.live = a.live; r.kpi = (double)a.live / a.trench;
-    return r;
-}
-
 struct SetData {
     std::string name;
     std::vector<Test> tests;
@@ -147,14 +126,13 @@ struct SetData {
 
 int main(int argc, char** argv) {
     std::string mode = "port";
-    int polIdx = 0, oldPol = 0, youngPol = 0;
+    int polIdx = 0;
     bool verbose = false;
     std::vector<std::string> paths;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--pol") { std::string v = argv[++i]; if (v == "all") mode = "all"; else { mode = "pol"; polIdx = atoi(v.c_str()); } }
         else if (a == "--port") mode = "port";
-        else if (a == "--oracle") { mode = "oracle"; oldPol = atoi(argv[++i]); youngPol = atoi(argv[++i]); }
         else if (a == "--check") CHECK = true;
         else if (a == "-v") verbose = true;
         else if (a == "--dump") DUMP = true;
@@ -193,18 +171,6 @@ int main(int argc, char** argv) {
         return sd.weighted ? s : s / std::max(1.0, sw);
     };
 
-    if (mode == "oracle") {
-        for (int T : {10, 30, 100, 300, 1000, 3000, 10000, 30000, 100000, 1 << 29}) {
-            printf("T=%-9d", T);
-            for (auto& sd : sets) {
-                std::vector<double> k(sd.tests.size());
-                for (size_t i = 0; i < sd.tests.size(); i++) k[i] = runOracle(sd.tests[i], oldPol, youngPol, T).kpi;
-                printf(" %s=%.4f", sd.name.c_str(), agg(sd, k));
-            }
-            printf("\n");
-        }
-        return 0;
-    }
     if (mode == "all") {
         printf("%-16s", "set");
         for (int k = 0; k < NPOL; k++) printf(" %8s", POLS[k].name);

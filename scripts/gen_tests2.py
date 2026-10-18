@@ -169,6 +169,34 @@ def gen_invert(rng, n):
     return gen_twophase(rng, n, invert=True)
 
 
+
+def gen_sorted2(rng, n):
+    """Как открытые 5/9: серии одинаковых длин по возрастанию, после серии удаляются трубы серии с фиксированным шагом/смещением
+    (в 5/9: шаг 2, смещение 0, в порядке PID). Параметры фиксируются на весь тест."""
+    variant = rng.choice(["full", "pow2", "subset", "evens", "pow3"])
+    if variant == "full":
+        lens = list(range(1, rng.choice([20, 30, 40]) + 1))
+    elif variant == "pow2":
+        lens = [1, 2, 4, 8, 16, 32]
+    elif variant == "pow3":
+        lens = [1, 3, 9, 27]
+    elif variant == "evens":
+        lens = list(range(2, 41, 2))
+    else:
+        lens = sorted(rng.sample(range(1, MAX_LEN + 1), rng.randint(5, 15)))
+    step = rng.choice([2, 2, 2, 3, 4])
+    off = rng.choice([0, 0, 0, 1])
+    group = max(2 * step, int(n / (1.3 * len(lens))))
+    b = Builder(n)
+    for L in lens:
+        if not b.room(group + group // step + 2):
+            break
+        pids = [b.place(L) for _ in range(group)]
+        for p in pids[off::step]:
+            b.remove(p)
+    return b.cmds
+
+
 def gen_tiny(rng, n):
     # n игнорируется: размер выбирается внутри (6..24 команд)
     size = rng.randint(6, 24)
@@ -186,6 +214,7 @@ def gen_tiny(rng, n):
 CLASSES = {
     "twophase": (gen_twophase, [10000, 50000, 200000]),
     "invert": (gen_invert, [10000, 50000]),
+    "sorted2": (gen_sorted2, [3000, 7500, 9000]),
     "tiny": (gen_tiny, [0]),
 }
 
