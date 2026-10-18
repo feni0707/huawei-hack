@@ -79,6 +79,7 @@ struct Pol {
     float tau = 0.5f; // класс T, если предсказанная вероятность смерти >= tau
     float sw0 = 0, swsmall = 0, swsize = 0;  // SCORED/WFN: бонус точного попадания, штраф за малый остаток (< th), вес размера дыры
     float wkap = 1e9f;                       // WFN: если лучшая стоимость > wkap * L — труба идёт в хвост
+    int Cfrac = 0;                           // >0: чанк арены не больше trench / Cfrac (на малых траншеях чанки съедают много)
     float swaddr = 0, swdist = 0;            // SCORED: вес относительного адреса дыры (a/trench) и расстояния до последнего освобождения
 };
 
@@ -94,7 +95,11 @@ static const Pol POLS_INIT[] = {
 static const int NPOL0 = sizeof(POLS_INIT) / sizeof(POLS_INIT[0]);
 // Таблица политик изменяема, чтобы стенд мог перебирать параметры (в бою не меняется).
 static std::vector<Pol>& polTable() {
-    static std::vector<Pol> v(POLS_INIT, POLS_INIT + NPOL0);
+    static std::vector<Pol> v = [] {
+        std::vector<Pol> t(POLS_INIT, POLS_INIT + NPOL0);
+        for (auto& p : t) if (p.js >= 0) p.Cfrac = 16;   // на малых траншеях чанк арены не больше trench/16
+        return t;
+    }();
     return v;
 }
 #define POLS (polTable())
@@ -348,6 +353,7 @@ struct Alloc {
                 D = a; carve(a, h, useT ? 1 : 0, D, L); commit(D, L, 1); return;
             }
             int C = std::min(std::max((int)(p.Cmode == 0 ? emaT * p.Cdiv : liveT / p.Cdiv), p.Cmin), p.Cmax);
+            if (p.Cfrac > 0) C = std::min(C, trench / p.Cfrac);
             int need = std::max(C, L);
             int tailLen = trench - tailStart;
             if (tailLen < need) { N = (need - tailLen + 19) / 20; trench += 20 * N; }
