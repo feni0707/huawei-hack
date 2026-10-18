@@ -27,7 +27,7 @@ typedef long long ll;
 //      попадания у соседа с высокой долей смертей его длины (только в этом режиме)
 // P33=1 — правило P15 только вне потоков, P33=2 — промежутки с мёртвым остатком ≥ P15 исключаются из кандидатов (вне потоков); P36 — мин. доля редкого значения признака для каппы;
 // P39 — штраф замуровывания, только если s + len(соседа) встречается среди недавних укладок с долей ≥ P39
-static double P[40] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.5, 2, 0, 3, 60, 0, 4, 0, 3, 4, 0,
+static double P[48] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.5, 2, 0, 3, 60, 0, 4, 0, 3, 4, 0,
                        400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 2, 0, 0, 0.3, 0, 0.99, 0.05};
 
 // ---------------------------------------------------------------- аллокатор
@@ -147,6 +147,8 @@ struct Alloc {
     int lastDelPid = 0; bool lastWasDel = false;
     int curFeat = -1;
     double tieAge = 0;
+    double labSame = 0, labTot = 0;   // соседние удаления помеченных труб: совпал ли поток (подтверждение потоков)
+    bool streamsVerified() const { return labTot >= 20 && labSame / labTot >= P[41]; }
     double bornLab[2] = {0, 0}, diedLab[2] = {0, 0};   // проверка прогноза: смерти среди помеченных A/B
     // ---- риск смерти соседа по возрасту
     // aliveBit — дерево Фенвика по PID (живые), deathAge[b] — число смертей в возрасте [2^b-1, 2^(b+1)-1)
@@ -383,12 +385,15 @@ struct Alloc {
             D = chooseSide(bgs, bs, L, st);
             takeFrom(bgs, D, L);
         } else {
+            if (P[40] == 1 && st == 1 && !streamsVerified()) st = 0;   // не подтверждено — B кладём как A
+            bool smallChunk = P[40] == 2 && st >= 0 && !streamsVerified();
             int fgs = (F > 0 && tag[F] < 0) ? -tag[F] - 1 : F;
             int fl = F - fgs;
             int chunk = (int)P[20];
             if (P[26] > 0) chunk = std::min(chunk, std::max(L, (int)(P[26] * bVol)));
             if (P[35] > 0) chunk = std::min(chunk, std::max(2 * L, (int)(P[35] * T)));   // не больше доли траншеи
             if (P[37] > 0 && st == 1) chunk = std::min(chunk, std::max(L, (int)(P[37] * fbVol)));
+            if (smallChunk) chunk = std::min(chunk, (int)P[42]);
             if (fl >= L) {
                 D = st == 1 ? F - L : fgs;
                 takeFrom(fgs, D, L);
@@ -444,6 +449,10 @@ struct Alloc {
         if (d == F) F = e;
         unsigned char fv = feat[pid];
         if (stream[pid] >= 0) diedLab[stream[pid]] += 1;
+        if (lastWasDel && stream[pid] >= 0 && stream[lastDelPid] >= 0) {
+            labSame *= 0.998; labTot *= 0.998;
+            labTot += 1; labSame += (stream[pid] == stream[lastDelPid]);
+        }
         for (int f = 0; f < NF; f++) {
             int v = (fv >> f) & 1;
             deathV[f][v] += 1;
@@ -493,7 +502,7 @@ int main(int argc, char** argv) {
         char* p = (char*)s;
         while (*p) {
             char* q; long i = strtol(p, &q, 10); if (q == p || *q != '=') break;
-            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 40) P[i] = v; p = q;
+            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 48) P[i] = v; p = q;
         }
     }
     bool quiet = getenv("SFQ") != nullptr;
