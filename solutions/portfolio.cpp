@@ -17,6 +17,27 @@
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
+// CPU-время процесса в секундах (для аварийного упрощения при медленной проверяющей машине)
+static double cpuSeconds() {
+#ifdef _WIN32
+    FILETIME c, e, k, u;
+    GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
+    auto t = [](const FILETIME& f) { return (double)(((uint64_t)f.dwHighDateTime << 32) | f.dwLowDateTime) * 1e-7; };
+    return t(k) + t(u);
+#else
+    timespec ts;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+#endif
+}
 
 static inline int ctz64(uint64_t x) {
 #ifdef _MSC_VER
@@ -39,7 +60,7 @@ static inline int clz64idx(uint64_t x) {  // индекс старшего би�
 
 // ---------------------------------------------------------------- политики
 
-enum Sel { BEST, FIRST, LAST, WORST, EXACTWORST, TFIT, NEAR };
+enum Sel { BEST, FIRST, LAST, WORST, EXACTWORST, TFIT };
 
 struct Pol {
     const char* name;
@@ -140,14 +161,6 @@ struct HoleSet {
             int s;
             if (hi) s = ctz64(hi);
             else s = clz64idx(mm);   // нет «хороших» остатков: берём наибольшую дыру из имеющихся (остаток < th)
-            if (s < 40) { a = *sz[s].begin(); h = s; }
-            else { a = big.begin()->second; h = big.begin()->first; }
-            return true;
-        }
-        case NEAR: {   // дыра с остатком <= th (наименьшим), иначе — нет кандидата (труба пойдёт в хвост)
-            uint64_t m2 = mm & ((L + th < 63) ? ((2ull << (L + th)) - 1) : ~0ull);
-            if (!m2) return false;
-            int s = ctz64(m2);
             if (s < 40) { a = *sz[s].begin(); h = s; }
             else { a = big.begin()->second; h = big.begin()->first; }
             return true;
@@ -281,72 +294,87 @@ struct Alloc {
 // Для каждой трубы при укладке строятся ключи контекстов (семейства признаков). По завершённым наблюдениям
 // («умерла за H команд» / «дожила до возраста H») каждое семейство ведёт таблицу P(смерть за H | ключ) по набору горизонтов.
 // Качество семейства оценивается онлайн (префиксная кросс-энтропия с затуханием); для прогноза берётся лучшее.
+// Пространства ключей маленькие и плотные — таблицы без хеширования.
+static inline float fastLog(float x) {   // натуральный логарифм, погрешность ~1e-3 (достаточно для сравнения семейств)
+    union { float f; uint32_t i; } u = {x};
+    float e = (float)((int)(u.i >> 23) - 127);
+    u.i = (u.i & 0x007FFFFF) | 0x3F800000;   // мантисса в [1,2)
+    float m = u.f;
+    float lg2 = e + (-0.34484843f * m + 2.02466578f) * m - 0.67487759f;
+    return lg2 * 0.69314718f;
+}
+
 struct Predictor {
     static const int NH = 7;                  // горизонты H_j = 8 * 4^j команд
     static const int NF = 15;                 // семейства признаков
     static int H(int j) { return 8 << (2 * j); }
     struct Cell { float a = 0, n = 0; };
     struct Entry { Cell c[NH]; };
-    std::unordered_map<uint64_t, Entry> tab[NF];
+    // размеры пространств ключей по семействам и смещения
+    static constexpr int KS[NF] = {1, 41, 2, 82, 3, 123, 2, 3, 4, 5, 6, 7, 8, 41 * 41, 41 * 41 * 41};
+    int off[NF + 1];
+    std::vector<Entry> tab;
     float loss[NF][NH];
-    // по трубам (pid с 1)
+    int needMask = (1 << NH) - 1;             // какие горизонты считаем
+    // по трубам (pid с 1): рождение, длина, две прошлые длины, позиция в серии (mod 6), маски
     std::vector<int> birth;
-    std::vector<uint8_t> resolved;            // маска разрешённых горизонтов
-    std::vector<uint8_t> alive;
-    std::vector<Entry*> ent;                  // NF указателей на трубу, подряд
+    std::vector<uint8_t> pL, pl1, pl2, prp, resolved, alive;
     std::vector<int> queue[NH];               // очередь pid по рождению (для «дожила до H»)
     size_t qhead[NH];
     int t = 0;                                // время = число обработанных команд
     int lp1 = 0, lp2 = 0, rp = 0;             // контекст: две прошлые длины, позиция в серии одинаковых длин
 
     Predictor() {
+        off[0] = 0;
+        for (int f = 0; f < NF; f++) off[f + 1] = off[f] + KS[f];
+        tab.resize(off[NF]);
         for (int f = 0; f < NF; f++) for (int j = 0; j < NH; j++) loss[f][j] = 0.0f;
         for (int j = 0; j < NH; j++) qhead[j] = 0;
-        birth.assign(1, 0); resolved.assign(1, 0); alive.assign(1, 0); ent.assign(NF, nullptr);
+        birth.assign(1, 0); pL.assign(1, 0); pl1.assign(1, 0); pl2.assign(1, 0); prp.assign(1, 0);
+        resolved.assign(1, 0); alive.assign(1, 0);
     }
 
-    static inline uint64_t mix(uint64_t a, uint64_t b) { return a * 1000003ull + b + 12345; }
+    // индексы записей по семействам для трубы с параметрами
+    inline void keys(int pid, int L, int l1, int l2, int rpn, int* k) const {
+        k[0] = off[0];
+        k[1] = off[1] + L;
+        k[2] = off[2] + rpn % 2;
+        k[3] = off[3] + L * 2 + rpn % 2;
+        k[4] = off[4] + rpn % 3;
+        k[5] = off[5] + L * 3 + rpn % 3;
+        for (int m = 2; m <= 8; m++) k[4 + m] = off[4 + m] + pid % m;
+        k[13] = off[13] + l1 * 41 + L;
+        k[14] = off[14] + (l2 * 41 + l1) * 41 + L;
+    }
 
     // вызывается при укладке очередной трубы (до размещения); возвращает вероятности p[j] смерти за H_j
     void onPlace(int L, float* p) {
         int pid = (int)birth.size();
-        uint64_t keys[NF];
         int rpn = (L == lp1) ? rp + 1 : 0;
-        keys[0] = 0;
-        keys[1] = L;
-        keys[2] = rpn % 2;
-        keys[3] = mix(L, rpn % 2);
-        keys[4] = rpn % 3;
-        keys[5] = mix(L, rpn % 3);
-        for (int m = 2; m <= 8; m++) keys[4 + m] = (uint64_t)(pid % m);  // 6..12
-        keys[13] = mix(lp1, L);
-        keys[14] = mix(mix(lp2, lp1), L);
-        birth.push_back(t);
-        resolved.push_back(0);
-        alive.push_back(1);
-        size_t base = ent.size();
-        ent.resize(base + NF);
-        for (int f = 0; f < NF; f++) ent[base + f] = &tab[f][keys[f]];
+        birth.push_back(t); pL.push_back((uint8_t)L); pl1.push_back((uint8_t)lp1); pl2.push_back((uint8_t)lp2);
+        prp.push_back((uint8_t)(rpn % 6)); resolved.push_back(0); alive.push_back(1);
+        int k[NF];
+        keys(pid, L, lp1, lp2, rpn % 6, k);
         for (int j = 0; j < NH; j++) {
+            if (!(needMask >> j & 1)) { p[j] = 0.5f; continue; }
             int bf = 0;
             float bl = 1e30f;
-            for (int f = 0; f < NF; f++) {
-                if (loss[f][j] < bl) { bl = loss[f][j]; bf = f; }
-            }
-            const Cell& c = ent[base + bf]->c[j];
+            for (int f = 0; f < NF; f++) if (loss[f][j] < bl) { bl = loss[f][j]; bf = f; }
+            const Cell& c = tab[k[bf]].c[j];
             p[j] = (c.a + 0.5f) / (c.n + 1.0f);
+            queue[j].push_back(pid);
         }
-        for (int j = 0; j < NH; j++) queue[j].push_back(pid);
         rp = rpn; lp2 = lp1; lp1 = L;
     }
 
     void resolve(int pid, int j, int y) {
         resolved[pid] |= 1 << j;
-        Entry** e = &ent[(size_t)pid * NF];
+        int k[NF];
+        keys(pid, pL[pid], pl1[pid], pl2[pid], prp[pid], k);
         for (int f = 0; f < NF; f++) {
-            Cell& c = e[f]->c[j];
+            Cell& c = tab[k[f]].c[j];
             float p = (c.a + 0.5f) / (c.n + 1.0f);
-            float l = -std::log(y ? p : 1.0f - p);
+            float l = -fastLog(y ? p : 1.0f - p);
             loss[f][j] = loss[f][j] * 0.995f + l;
             c.n += 1; c.a += y;
         }
@@ -356,13 +384,14 @@ struct Predictor {
         alive[pid] = 0;
         int age = t - birth[pid];
         for (int j = 0; j < NH; j++)
-            if (!(resolved[pid] >> j & 1) && age <= H(j)) resolve(pid, j, 1);
+            if ((needMask >> j & 1) && !(resolved[pid] >> j & 1) && age <= H(j)) resolve(pid, j, 1);
     }
 
     // конец команды: продвинуть время, разрешить «дожила до H»
     void tick() {
         t++;
         for (int j = 0; j < NH; j++) {
+            if (!(needMask >> j & 1)) continue;
             while (qhead[j] < queue[j].size()) {
                 int pid = queue[j][qhead[j]];
                 if (birth[pid] + H(j) > t) break;
@@ -372,19 +401,18 @@ struct Predictor {
         }
     }
 };
+constexpr int Predictor::KS[Predictor::NF];
 
 // ---------------------------------------------------------------- движок (портфель)
 
 struct EngineParams {   // параметры выбора лидера (стенд может менять)
-    double hyst = 0.01; // переключаться, только если лидер короче текущей на hyst*trench
+    double hyst = 0.01; // переключаться, только если лидер лучше текущей на hyst (доля оценки)
     int absMargin = 0;  // ... и минимум на столько клеток
     int dwell = 500;    // минимум команд между переключениями
-    double beta = 0.0;  // вес прогноза по наклону: score = trench + beta * slope * t
-    double wfrac = 0.25;  // окно наклона = max(wmin, wfrac * t) команд
-    int wmin = 100;
-    double gamma = 0.5; // score = trench - gamma * (trench - live - unusable_holes) ... см. ниже
-    int qwin = 256;     // окно для квантиля длин
+    double gamma = 0.5; // оценка = live + (1-gamma)*свободное + gamma*непригодное (дыры короче квантиля длин)
+    int qwin = 256;     // окно (число последних укладок) для квантиля длин
     double qq = 0.25;   // квантиль
+    int every = 8;      // оценивать лидера раз в столько укладок
 };
 static EngineParams& engineParams() { static EngineParams ep; return ep; }
 static bool& dbgSwitch() { static bool b = false; return b; }
@@ -392,71 +420,83 @@ static bool& dbgSwitch() { static bool b = false; return b; }
 struct Engine {
     Alloc real;
     std::vector<Alloc> sh;   // теневые симуляции чистых политик (пусто в режиме одной политики)
-    std::vector<std::vector<int>> hist;  // история длины траншеи каждой тени (по командам укладки)
     Predictor pred;
     int fixed;               // >= 0: одна чистая политика; -1: портфель
     int cur = 0;
     int sinceSwitch = 0;
-    int lenRing[4096];
-    int ringPos = 0;
+    bool usePred = true;
+    int ring[4096];          // длины последних укладок (окно квантиля)
+    int ringCnt[41] = {0};
+    int placed = 0;
+    int cmds = 0;
+    bool lean = false;       // аварийный режим: теней и предсказателя нет, реальная траншея ведётся одной политикой
+    double leanPerCmd = 21e-6;   // порог CPU на команду: 5 с / 200000 = 25 мкс, берём запас
 
     explicit Engine(int p = -1) : fixed(p) {
-        if (p < 0) { sh.resize(NPOL); hist.resize(NPOL); }
+        if (p < 0) sh.resize(NPOL);
+        usePred = false;
+        pred.needMask = 0;
+        for (int k = 0; k < NPOL; k++) if ((p < 0 || k == p) && POLS[k].js >= 0) { usePred = true; pred.needMask |= 1 << POLS[k].js; }
     }
     static int classOf(const Pol& p, const float* pr) { return p.js >= 0 && pr[p.js] >= 0.5f ? 1 : 0; }
+
+    double score(int k, int Lq) const {
+        const EngineParams& ep = engineParams();
+        const Alloc& a = sh[k];
+        double freeK = (double)a.trench - (double)a.live;
+        double unus = (double)(a.hs[0].unusable(Lq) + a.hs[1].unusable(Lq));
+        return (double)a.live + (1.0 - ep.gamma) * freeK + ep.gamma * unus;
+    }
+
+    void goLean() {
+        lean = true;
+        int pick = 0;
+        for (int k = 0; k < NPOL; k++) if (POLS[k].js < 0) { pick = k; if (k == cur) break; }
+        if (POLS[cur].js < 0) pick = cur;
+        fixed = pick;
+        usePred = false;
+        std::vector<Alloc>().swap(sh);
+        pred = Predictor();
+    }
     void place(int L, int& N, int& D) {
+        if (!lean && (cmds & 4095) == 4095 && cmds >= 8192 && cpuSeconds() > leanPerCmd * cmds) goLean();
         float pr[Predictor::NH];
-        pred.onPlace(L, pr);
+        for (int j = 0; j < Predictor::NH; j++) pr[j] = 0.5f;
+        if (usePred) pred.onPlace(L, pr);
+        cmds++;
         if (fixed >= 0) {
             real.place(POLS[fixed], L, classOf(POLS[fixed], pr), N, D);
         } else {
-            for (int k = 0; k < NPOL; k++) { int n, d; sh[k].place(POLS[k], L, classOf(POLS[k], pr), n, d); }
             const EngineParams& ep = engineParams();
+            for (int k = 0; k < NPOL; k++) { int n, d; sh[k].place(POLS[k], L, classOf(POLS[k], pr), n, d); }
+            // окно длин
+            int w = std::min(ep.qwin, 4096);
+            if (placed >= w) ringCnt[ring[placed % w]]--;
+            ring[placed % w] = L; ringCnt[L]++; placed++;
             sinceSwitch++;
-            for (int k = 0; k < NPOL; k++) hist[k].push_back(sh[k].trench);
-            int tt = (int)hist[0].size();
-            // квантиль длин недавних укладок
-            lenRing[ringPos % ep.qwin] = L; ringPos++;
-            int Lq = 1;
-            if (ep.gamma > 0) {
-                int hcnt[41] = {0}, n = std::min(ringPos, ep.qwin);
-                for (int i = 0; i < n; i++) hcnt[lenRing[i]]++;
-                int acc = 0, target = (int)(ep.qq * n);
-                for (Lq = 1; Lq < 40; Lq++) { acc += hcnt[Lq]; if (acc > target) break; }
-            }
-            auto score = [&](int k) {
-                double sc = sh[k].trench;
-                if (ep.gamma > 0) {
-                    double freeK = (double)sh[k].trench - (double)sh[k].live;
-                    double unus = (double)(sh[k].hs[0].unusable(Lq) + sh[k].hs[1].unusable(Lq));
-                    sc = (double)sh[k].live + (1.0 - ep.gamma) * freeK + ep.gamma * unus;
+            if (placed % ep.every == 0 && sinceSwitch >= ep.dwell) {
+                int n = std::min(placed, w), acc = 0, target = (int)(ep.qq * n), Lq;
+                for (Lq = 1; Lq < 40; Lq++) { acc += ringCnt[Lq]; if (acc > target) break; }
+                int best = cur;
+                double sBest = score(cur, Lq), sCur = sBest;
+                for (int k = 0; k < NPOL; k++) { double sk = score(k, Lq); if (sk < sBest) { sBest = sk; best = k; } }
+                if (best != cur && sBest < sCur - ep.hyst * sCur - ep.absMargin) {
+                    if (dbgSwitch()) {
+                        fprintf(stderr, "t=%d switch %s -> %s  trench: real=%d", cmds, POLS[cur].name, POLS[best].name, real.trench);
+                        for (int k = 0; k < NPOL; k++) fprintf(stderr, " %s=%d", POLS[k].name, sh[k].trench);
+                        fputc('\n', stderr);
+                    }
+                    cur = best;
+                    sinceSwitch = 0;
                 }
-                if (ep.beta > 0 && tt > ep.wmin) {
-                    int W = std::max(ep.wmin, (int)(ep.wfrac * tt));
-                    double slope = (double)(sh[k].trench - hist[k][tt - 1 - W]) / W;
-                    sc += ep.beta * slope * tt;
-                }
-                return sc;
-            };
-            int best = cur;
-            double bs = score(cur);
-            for (int k = 0; k < NPOL; k++) { double sk = score(k); if (sk < score(best)) best = k; }
-            if (best != cur && sinceSwitch >= ep.dwell && score(best) < bs - ep.hyst * bs - ep.absMargin) {
-                if (dbgSwitch()) {
-                    fprintf(stderr, "t=%d switch %s -> %s  trench: real=%d", pred.t, POLS[cur].name, POLS[best].name, real.trench);
-                    for (int k = 0; k < NPOL; k++) fprintf(stderr, " %s=%d", POLS[k].name, sh[k].trench);
-                    fputc('\n', stderr);
-                }
-                cur = best;
-                sinceSwitch = 0;
             }
             real.place(POLS[cur], L, classOf(POLS[cur], pr), N, D);
         }
-        pred.tick();
+        if (usePred) pred.tick();
     }
     int remove(int pid) {
-        pred.onDelete(pid);
-        pred.tick();
+        cmds++;
+        if (usePred) { pred.onDelete(pid); pred.tick(); }
         for (auto& a : sh) a.remove(pid);
         return real.remove(pid);
     }

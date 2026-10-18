@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
                 std::string f = kv.substr(0, q2);
                 double val = atof(kv.substr(q2 + 1).c_str());
                 if (f == "hyst") engineParams().hyst = val; else if (f == "absMargin") engineParams().absMargin = (int)val;
-                else if (f == "dwell") engineParams().dwell = (int)val; else if (f == "beta") engineParams().beta = val; else if (f == "gamma") engineParams().gamma = val; else if (f == "qwin") engineParams().qwin = (int)val; else if (f == "qq") engineParams().qq = val; else if (f == "wfrac") engineParams().wfrac = val; else if (f == "wmin") engineParams().wmin = (int)val; else fprintf(stderr, "unknown eng field %s\n", f.c_str());
+                else if (f == "dwell") engineParams().dwell = (int)val; else if (f == "every") engineParams().every = (int)val; else if (f == "gamma") engineParams().gamma = val; else if (f == "qwin") engineParams().qwin = (int)val; else if (f == "qq") engineParams().qq = val; else fprintf(stderr, "unknown eng field %s\n", f.c_str());
                 st = e + 1;
             }
         }
