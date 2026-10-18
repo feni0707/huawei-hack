@@ -25,10 +25,10 @@ typedef long long ll;
 //      0  1      2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19
 // P13 «крошечная траншея» (T < P13): точное попадание, иначе самая большая дыра; P32 — штраф точного
 //      попадания у соседа с высокой долей смертей его длины (только в этом режиме)
-// P33=1 — правило P15 только вне потоков; P36 — мин. доля редкого значения признака для каппы;
+// P33=1 — правило P15 только вне потоков, P33=2 — промежутки с мёртвым остатком ≥ P15 исключаются из кандидатов (вне потоков); P36 — мин. доля редкого значения признака для каппы;
 // P39 — штраф замуровывания, только если s + len(соседа) встречается среди недавних укладок с долей ≥ P39
-static double P[40] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.5, 2, 0, 3, 60, 0, 5, 0, 3, 4, 0,
-                       400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 1, 0, 0, 0.3, 0, 0.99, 0.05};
+static double P[40] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.5, 2, 0, 3, 60, 0, 4, 0, 3, 4, 0,
+                       400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 2, 0, 0, 0.3, 0, 0.99, 0.05};
 
 // ---------------------------------------------------------------- аллокатор
 // Свободные промежутки: граничные метки (склейка за O(1)) + корзины по точной длине (< NB) + set для больших.
@@ -146,6 +146,7 @@ struct Alloc {
     double birthV[NF][2] = {{0}}, deathV[NF][2] = {{0}};
     int lastDelPid = 0; bool lastWasDel = false;
     int curFeat = -1;
+    double tieAge = 0;
     double bornLab[2] = {0, 0}, diedLab[2] = {0, 0};   // проверка прогноза: смерти среди помеченных A/B
     // ---- риск смерти соседа по возрасту
     // aliveBit — дерево Фенвика по PID (живые), deathAge[b] — число смертей в возрасте [2^b-1, 2^(b+1)-1)
@@ -317,6 +318,15 @@ struct Alloc {
                 }
             }
             if (P[29] != 0 && st >= 0 && (kin(pidLeftOf(gs), st) || kin(pidRightOf(gs + s), st))) cst -= P[29];
+            if (P[40 - 1 + 0] != 0 && false) {}
+            if (P[15] > 0 && P[33] == 2 && st < 0 && s > L && s - L < m && s - L >= P[15]) cst = 1e17;   // мёртвый остаток — не кандидат
+            if (tieAge != 0) {
+                // разбивка ничьих по возрасту соседей (молодые = большой PID)
+                int lp = pidLeftOf(gs), rp = pidRightOf(gs + s);
+                double young = std::max(lp, rp), old = std::min(lp, rp);
+                if (s == L) cst += tieAge * 1e-7 * old;        // точное — между старыми
+                else cst -= tieAge * 1e-7 * young;             // остаток — к молодому
+            }
             if (cst < bestC) { bestC = cst; bgs = gs; bs = s; }
         };
         for (int s = L; s < NB; s++) {
@@ -361,7 +371,8 @@ struct Alloc {
             diedLab[1] / bornLab[1] - diedLab[0] / bornLab[0] > P[9]) useGap = false;   // прогноз подтвердился: B — к границе роста
         if (useGap && P[14] == 5 && bestC > P[19]) useGap = false;   // дыра не стоит того — в хвост
         // P15: если лучший промежуток оставляет мёртвый остаток >= P15 — лучше в хвост
-        if (useGap && P[15] > 0 && !(P[33] == 1 && st >= 0)) {
+        if (bgs >= 0 && bestC >= 1e17) useGap = false;
+        if (useGap && P[15] > 0 && P[33] != 2 && !(P[33] == 1 && st >= 0)) {
             int r = bs - L;
             if (r > 0 && r < m) {
                 double keep = P[25] ? 1 - std::max(hz2(pidLeftOf(bgs)), hz2(pidRightOf(bgs + bs))) : 1;
@@ -510,6 +521,7 @@ int main(int argc, char** argv) {
         std::vector<int> death(1, -1);
         { int p = 0; for (size_t i = 0; i < cmd.size(); i++) { if (cmd[i] > 0) { death.push_back(-1); p++; } else death[-cmd[i]] = (int)i; } }
         A.oracleDeath = death.data();
+        if (getenv("SFTIE")) A.tieAge = atof(getenv("SFTIE"));
         if (getenv("SFFORCE")) { A.forcePid = atoi(getenv("SFFORCE")); A.forceAlt = atoi(getenv("SFALT")); }
         if (getenv("SFLIST")) A.listPid = atoi(getenv("SFLIST"));
         if (getenv("SFEPS")) { A.epsRand = atoi(getenv("SFEPS")); A.rs ^= (unsigned long long)atoll(getenv("SFSEED")) * 0x9E3779B97F4A7C15ULL + 1; }

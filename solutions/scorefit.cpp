@@ -13,7 +13,8 @@
 //      границы роста F (участками по 400 м). Какая бы половина ни умерла, освобождается сплошной кусок.
 //      Если прогноз «B умирает чаще» подтвердился на помеченных трубах, B идёт сразу к границе роста.
 //   4. Мелкие правила: не «замуровывать» точным попаданием дыру рядом с трубой, чья длина сейчас часто
-//      удаляется (если слитая дыра — частая длина); мёртвый остаток (< минимальной недавней длины) ≥ 5 м — лучше в хвост (вне потоков);
+//      удаляется (если слитая дыра — частая длина); промежутки, где останется мёртвый остаток (короче
+//      минимальной недавней длины) ≥ 4 м, не рассматриваем (вне потоков);
 //      в крошечной траншее (< 60 м) — точное попадание, иначе самая большая дыра.
 //
 // Код написан с оглядкой на перенос на Cangjie: без std::set/map/priority_queue и лямбд — кучи и
@@ -243,7 +244,9 @@ struct Alloc {
     }
 
     // стоимость укладки трубы L в промежуток gs длины s (меньше — лучше)
-    double gapCost(int gs, int s, int L, double selfHz) const {
+    double gapCost(int gs, int s, int L, int st, int m, double selfHz) const {
+        // мёртвый остаток (короче всех ожидаемых труб) ≥ 4 м — промежуток не кандидат (вне потоков)
+        if (st < 0 && s > L && s - L < m && s - L >= 4) return 1e17;
         if (T < 60) {   // крошечная траншея
             if (s == L) return -1000 + 2000 * dmax(pdieLen(pidLeftOf(gs)), pdieLen(pidRightOf(gs + s)));
             return -s;
@@ -286,26 +289,21 @@ struct Alloc {
         for (int s = L; s < NB; s++) {
             int g = firstGap(s, ts);
             if (g < 0) continue;
-            double c = gapCost(g, s, L, selfHz);
+            double c = gapCost(g, s, L, st, m, selfHz);
             if (c < bestC) { bestC = c; bgs = g; bs = s; }
         }
         {
             int bl = 0, g = firstBig(ts, bl);
             if (g >= 0) {
-                double c = gapCost(g, bl, L, selfHz);
+                double c = gapCost(g, bl, L, st, m, selfHz);
                 if (c < bestC) { bestC = c; bgs = g; bs = bl; }
             }
         }
 
-        bool useGap = bgs >= 0;
+        bool useGap = bgs >= 0 && bestC < 1e17;
         // прогноз «B умирает» подтвердился — B сразу к границе роста
         if (st == 1 && bornLab[1] >= 20 && bornLab[0] >= 20 &&
             diedLab[1] / bornLab[1] - diedLab[0] / bornLab[0] > 0.5) useGap = false;
-        // мёртвый остаток (короче всех ожидаемых труб) ≥ 5 м — лучше в хвост (вне потоков)
-        if (useGap && st < 0) {
-            int r = bs - L;
-            if (r > 0 && r < m && r >= 5) useGap = false;
-        }
 
         ll N = 0; int D;
         if (useGap) {
