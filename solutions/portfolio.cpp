@@ -22,9 +22,8 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
-#else
-#include <time.h>
 #endif
+#include <ctime>
 
 // CPU-время процесса в секундах (для аварийного упрощения при медленной проверяющей машине)
 static double cpuSeconds() {
@@ -34,9 +33,7 @@ static double cpuSeconds() {
     auto t = [](const FILETIME& f) { return (double)(((uint64_t)f.dwHighDateTime << 32) | f.dwLowDateTime) * 1e-7; };
     return t(k) + t(u);
 #else
-    timespec ts;
-    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
-    return ts.tv_sec + ts.tv_nsec * 1e-9;
+    return (double)std::clock() / CLOCKS_PER_SEC;   // на POSIX — CPU-время процесса (без -lrt)
 #endif
 }
 
