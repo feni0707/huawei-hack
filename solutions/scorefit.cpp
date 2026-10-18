@@ -33,10 +33,20 @@ static const int MAXL = 40;
 
 struct Alloc {
     ll T = 0;                          // длина траншеи
-    std::vector<int> gapLenAt;         // длина промежутка, начинающегося в s (0 — нет)
-    std::vector<int> gapStartAtEnd;    // начало промежутка, кончающегося в e (-1 — нет)
-    std::vector<int> pidStartAt;       // PID трубы, начинающейся в x (0 — нет)
-    std::vector<int> pidEndAt;         // PID трубы, кончающейся в x (0 — нет)
+    // tag[x] > 0 — в x начинается промежуток длины tag[x]; tag[x] < 0 — в x кончается промежуток,
+    // начавшийся в -tag[x]-1; 0 — ни то ни другое (соседние промежутки всегда склеены, поэтому одно x
+    // не бывает сразу началом и концом). owner[x] — PID трубы в клетке x (в свободных клетках — мусор).
+    // Постраничное хранение: память растёт вместе с траншеей без копирования (худший случай T ≈ 8·10^6).
+    struct Paged {
+        static const int SH = 16, MASK = (1 << SH) - 1;
+        std::vector<int*> pg; int fill;
+        explicit Paged(int f) : fill(f) {}
+        ~Paged() { for (int* p : pg) delete[] p; }
+        void grow(ll n) { while ((ll)pg.size() << SH < n) { int* p = new int[1 << SH]; for (int i = 0; i <= MASK; i++) p[i] = fill; pg.push_back(p); } }
+        int& operator[](ll i) { return pg[i >> SH][i & MASK]; }
+        int operator[](ll i) const { return pg[i >> SH][i & MASK]; }
+    };
+    Paged tag{0}, owner{0};
     std::set<int> bucket[NB];          // начала промежутков длины s (s < NB), по адресу
     std::set<std::pair<int,int>> big;  // (len, start) для len >= NB
     std::vector<int> pos, len;         // по PID
@@ -46,30 +56,26 @@ struct Alloc {
     double cnt[MAXL + 1] = {0}, cntTot = 0;
 
     void ensure(ll n) {
-        if ((ll)gapLenAt.size() < n + 1) {
-            ll m = std::max<ll>(n + 1, gapLenAt.size() * 2 + 64);
-            gapLenAt.resize(m, 0); gapStartAtEnd.resize(m, -1);
-            pidStartAt.resize(m, 0); pidEndAt.resize(m, 0);
-        }
+        tag.grow(n + 1); owner.grow(n + 1);
     }
     void addGap(int s, int l) {
-        gapLenAt[s] = l; gapStartAtEnd[s + l] = s;
+        tag[s] = l; tag[s + l] = -s - 1;
         if (l < NB) bucket[l].insert(s); else big.insert({l, s});
     }
     void delGap(int s) {
-        int l = gapLenAt[s];
+        int l = tag[s];
         if (l < NB) bucket[l].erase(s); else big.erase({l, s});
-        gapLenAt[s] = 0; gapStartAtEnd[s + l] = -1;
+        tag[s] = 0; tag[s + l] = 0;
     }
     int freeRange(int s, int l) {   // возвращает конец склеенного промежутка
         int e = s + l;
-        if (e < T && gapLenAt[e] > 0) { int r = gapLenAt[e]; delGap(e); e += r; }
-        if (gapStartAtEnd[s] >= 0) { int ps = gapStartAtEnd[s]; delGap(ps); s = ps; }
+        if (e < T && tag[e] > 0) { int r = tag[e]; delGap(e); e += r; }
+        if (tag[s] < 0) { int ps = -tag[s] - 1; delGap(ps); s = ps; }
         addGap(s, e - s);
         return e;
     }
     void takeFrom(int gs, int d, int l) {
-        int gl = gapLenAt[gs];
+        int gl = tag[gs];
         delGap(gs);
         if (d > gs) addGap(gs, d - gs);
         if (d + l < gs + gl) addGap(d + l, gs + gl - (d + l));
@@ -81,7 +87,9 @@ struct Alloc {
         ensure(T);
         freeRange((int)oldT, (int)(T - oldT));
     }
-    int tailStart() const { return (T > 0 && gapStartAtEnd[T] >= 0) ? gapStartAtEnd[T] : (int)T; }
+    int tailStart() const { return (T > 0 && tag[T] < 0) ? -tag[T] - 1 : (int)T; }
+    int pidLeftOf(int x) const { return x > 0 ? owner[x - 1] : 0; }      // труба, кончающаяся в x (x — начало дыры)
+    int pidRightOf(int x) const { return x < T ? owner[x] : 0; }         // труба, начинающаяся в x (x — конец дыры)
 
     // ---- статистика
     void observe(int L) {
@@ -162,6 +170,10 @@ struct Alloc {
         return std::min(1.0, rel / P[30]);
     }
     double hz2(int p) const { return P[18] == 4 ? hzRate(p) : P[18] == 1 ? pdieLen(p) : P[18] == 2 ? std::max(pdieLen(p), hazard(p)) : P[18] == 3 ? pdieLen(p) * hazard(p) : hazard(p); }
+#ifdef SIM
+    unsigned long long rs = 88172645463325252ULL; int epsRand = 0;
+    unsigned long long rng() { rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17; return rs; }
+#endif
     const int* oracleDeath = nullptr;   // только SIM-эксперименты: время смерти по PID (команда), -1 — не умрёт
     int curCmd = 0;
 
@@ -207,7 +219,7 @@ struct Alloc {
     int chooseSide(int gs, int s, int L, int st) {
         int r = s - L;
         if (r == 0) return gs;
-        int lp = pidEndAt[gs], rp = pidStartAt[gs + s];
+        int lp = pidLeftOf(gs), rp = pidRightOf(gs + s);
         if (st >= 0) {
             if (P[29] != 0) {
                 bool kl = kin(lp, st), kr = kin(rp, st);
@@ -271,17 +283,17 @@ struct Alloc {
                 cst = s == L ? -P[5] : fragCost(s - L, m) + P[6] * (s - L);
                 if (P[17] != 0 && s == L) {
                     // точное попадание «замуровывает» дыру у соседа, который скоро умрёт (дыра бы выросла)
-                    double h = std::max(hz2(pidEndAt[gs]), hz2(pidStartAt[gs + s]));
+                    double h = std::max(hz2(pidLeftOf(gs)), hz2(pidRightOf(gs + s)));
                     if (P[18] == 4) h -= selfHz;   // вредно, только если новая труба живёт дольше соседа
                     if (h >= P[28]) cst += P[17] * h;
                 }
                 if (P[16] != 0 && s > L && s - L < m) {
                     // мёртвый остаток оживёт, только если умрёт сосед: штраф ~ r * P(оба соседа выживут)
-                    double hl = hazard(pidEndAt[gs]), hr = hazard(pidStartAt[gs + s]);
+                    double hl = hazard(pidLeftOf(gs)), hr = hazard(pidRightOf(gs + s));
                     cst += P[16] * (s - L) * (1 - std::max(hl, hr));
                 }
             }
-            if (P[29] != 0 && st >= 0 && (kin(pidEndAt[gs], st) || kin(pidStartAt[gs + s], st))) cst -= P[29];
+            if (P[29] != 0 && st >= 0 && (kin(pidLeftOf(gs), st) || kin(pidRightOf(gs + s), st))) cst -= P[29];
             if (cst < bestC) { bestC = cst; bgs = gs; bs = s; }
         };
         for (int s = L; s < NB; s++) {
@@ -298,6 +310,17 @@ struct Alloc {
                 k++; eval(it->second, it->first);
             }
         }
+#ifdef SIM
+        if (epsRand > 0 && (rng() % 1000) < epsRand) {
+            // случайный выбор: любая подходящая дыра (по одной на размер) или хвост
+            int opts[NB + 2], no = 0;
+            for (int s = L; s < NB; s++) for (int g : bucket[s]) { if (g == ts || g + s == F) continue; opts[no++] = s; break; }
+            int pick = (int)(rng() % (no + 1));
+            if (getenv("SFEPSLOG")) fprintf(stderr, "dev t=%d pid=%d L=%d best=%s%d pick=%s%d opts=%d\n", curCmd, pid, L, bgs >= 0 ? "hole" : "tail", bgs >= 0 ? bs : 0, pick == no ? "tail" : "hole", pick == no ? 0 : opts[pick], no);
+            if (pick == no) bgs = -1;
+            else { int s = opts[pick]; for (int g : bucket[s]) if (g != ts && g + s != F) { bgs = g; bs = s; break; } bestC = 0; }
+        }
+#endif
         ll N = 0; int D;
         bool useGap = bgs >= 0 && bestC < P[7] + 1e17 * (P[7] == 0);
         if (st == 1 && P[12] == 2) useGap = false;
@@ -308,7 +331,7 @@ struct Alloc {
         if (useGap && P[15] > 0) {
             int r = bs - L;
             if (r > 0 && r < m) {
-                double keep = P[25] ? 1 - std::max(hz2(pidEndAt[bgs]), hz2(pidStartAt[bgs + bs])) : 1;
+                double keep = P[25] ? 1 - std::max(hz2(pidLeftOf(bgs)), hz2(pidRightOf(bgs + bs))) : 1;
                 if (r * keep >= P[15]) useGap = false;
             }
         }
@@ -316,7 +339,7 @@ struct Alloc {
             D = chooseSide(bgs, bs, L, st);
             takeFrom(bgs, D, L);
         } else {
-            int fgs = (F > 0 && gapStartAtEnd[F] >= 0) ? gapStartAtEnd[F] : F;
+            int fgs = (F > 0 && tag[F] < 0) ? -tag[F] - 1 : F;
             int fl = F - fgs;
             int chunk = (int)P[20];
             if (P[26] > 0) chunk = std::min(chunk, std::max(L, (int)(P[26] * bVol)));
@@ -350,7 +373,7 @@ struct Alloc {
         if (getenv("SFPL") && pid >= atoi(getenv("SFPL")) && pid < atoi(getenv("SFPL")) + 30)
             fprintf(stderr, "place pid=%d L=%d st=%d D=%d N=%lld gap=%s bs=%d F=%d T=%lld\n", pid, L, st, D, N, useGap ? "hole" : "front", bs, F, T);
 #endif
-        pidStartAt[D] = pid; pidEndAt[D + L] = pid;
+        for (int i = 0; i < L; i++) owner[D + i] = pid;
         pos.push_back(D); len.push_back(L); alive.push_back(1); birthL[L] += 1; aliveCntL[L]++; aliveTot++;
         if ((int)aliveBit.size() <= pid) aliveBit.resize(std::max<size_t>(pid + 1, aliveBit.size() * 2 + 16), 0), rebuildBit();
         bitAdd(pid, 1);
@@ -370,7 +393,6 @@ struct Alloc {
         for (int k = 1; k <= MAXL; k++) recDel[k] *= P[31];
         recDelTot = recDelTot * P[31] + 1; recDel[l] += 1; aliveCntL[l]--; aliveTot--;
         deathAge[ageBucket((int)pos.size() - 1 - pid)] += 1;
-        pidStartAt[d] = 0; pidEndAt[d + l] = 0;
         int e = freeRange(d, l);
         if (d == F) F = e;
         unsigned char fv = feat[pid];
@@ -425,6 +447,7 @@ int main(int argc, char** argv) {
         std::vector<int> death(1, -1);
         { int p = 0; for (size_t i = 0; i < cmd.size(); i++) { if (cmd[i] > 0) { death.push_back(-1); p++; } else death[-cmd[i]] = (int)i; } }
         A.oracleDeath = death.data();
+        if (getenv("SFEPS")) { A.epsRand = atoi(getenv("SFEPS")); A.rs ^= (unsigned long long)atoll(getenv("SFSEED")) * 0x9E3779B97F4A7C15ULL + 1; }
         std::vector<int> cells;  // pid или 0
         std::vector<int> lastLen, freedAt;
         ll occ = 0; bool ok = true;
