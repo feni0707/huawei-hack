@@ -6,6 +6,7 @@
   alternating   — почти строгое чередование «уложить / удалить недавнюю», доминируют 2–3 длины (как 8, 13, 12)
   random_bursts — случайные длины (короткие 1..7 часты), пачки удалений свежих и старых труб (как 11, 15)
   phases        — длинная фаза коротких труб без удалений, смешанные фазы, в конце длинные трубы (как 14)
+  two_phase     — короткие, затем только длинные; во 2-й фазе удаляются свежие длинные и старые короткие (как 11/15)
   periodic      — периодический паттерн коротких длин, выборочные удаления по смещениям в периоде,
                   затем дозаполнение «уложить, уложить, удалить» (как 10)
 
@@ -223,12 +224,102 @@ def gen_periodic(rng, n):
     return b.cmds
 
 
+class Pool:
+    """Живые PID одного «пула» в порядке укладки; k-й с конца за O(log n) (дерево Фенвика)."""
+
+    def __init__(self, cap):
+        self.n = cap + 1
+        self.bit = [0] * (self.n + 1)
+        self.size = 0
+
+    def add(self, i, v):
+        self.size += v
+        while i <= self.n:
+            self.bit[i] += v
+            i += i & -i
+
+    def kth(self, k):                                  # k-й (с 1) по возрастанию PID
+        pos, step = 0, 1 << self.n.bit_length()
+        while step:
+            nxt = pos + step
+            if nxt <= self.n and self.bit[nxt] < k:
+                pos = nxt
+                k -= self.bit[nxt]
+            step >>= 1
+        return pos + 1
+
+    def from_end(self, r):                             # r-й с конца (r ≥ 0), r обрезается размером пула
+        return self.kth(self.size - min(r, self.size - 1))
+
+
+def gen_two_phase(rng, n):
+    """Как 11/15: фаза 1 — только короткие (1..a), удаляются свежие; фаза 2 — только длинные (a+1..c),
+    удаляются в основном свежие длинные, иногда — старые короткие (окно в глубине пула коротких)."""
+    a = rng.choice([5, 6, 7, 7, 8])
+    c = rng.choice([32, 36, 40, 40])
+    split = int(n * rng.uniform(0.42, 0.58))
+    p1_burst = rng.uniform(0.1, 0.17)                  # фаза 1: ≈ 20 % команд — удаления
+    mu1 = rng.uniform(10, 25)
+    p2_burst = rng.uniform(0.58, 0.7)                   # фаза 2: ≈ 50 % команд — удаления
+    mu2 = rng.uniform(25, 60)
+    p_short = rng.uniform(0.12, 0.25)                  # доля удалений старых коротких в фазе 2
+    p_tail2 = rng.uniform(0.15, 0.3)                   # доля «далёких» удалений длинных (тяжёлый хвост)
+    b = Builder(n)
+    pools = [Pool(n), Pool(n)]
+
+    def place(L, k):
+        p = b.place(L)
+        pools[k].add(p, 1)
+
+    def remove_rank(k, r):
+        if pools[k].size == 0:
+            return False
+        p = pools[k].from_end(int(r))
+        pools[k].add(p, -1)
+        b.remove(p)
+        return True
+
+    def burst(p_start):
+        if rng.random() >= p_start:
+            return 0
+        k = 1
+        while k < 14 and rng.random() < 0.45:
+            k += 1
+        return k
+
+    while b.room() and len(b.cmds) < split:
+        place(rng.randint(1, a), 0)
+        for _ in range(burst(p1_burst) if pools[0].size > 1 else 0):
+            if not b.room():
+                break
+            r = rng.expovariate(1 / mu1) if rng.random() < 0.93 else rng.expovariate(1 / 150)
+            remove_rank(0, r)
+    while b.room():
+        place(rng.randint(a + 1, c), 1)
+        if rng.random() >= p2_burst:
+            continue
+        k = 1
+        while k < 14 and rng.random() < 0.38:
+            k += 1
+        for _ in range(k):
+            if not b.room():
+                break
+            if pools[0].size and rng.random() < p_short:
+                remove_rank(0, pools[0].size * rng.uniform(0.03, 0.3))
+            elif rng.random() < p_tail2:
+                remove_rank(1, pools[1].size * rng.random() ** 3)
+            else:
+                remove_rank(1, rng.expovariate(1 / mu2))
+    return b.cmds
+
+
 CLASSES = {
     "sorted_groups": (gen_sorted_groups, [2000, 7500, 9000]),
     "alternating": (gen_alternating, [1500, 6500, 10000]),
     "random_bursts": (gen_random_bursts, [10000, 50000, 200000]),
     "phases": (gen_phases, [10000, 25000]),
     "periodic": (gen_periodic, [3000, 10000]),
+    "two_phase": (gen_two_phase, [10000, 50000, 200000]),
 }
 
 
