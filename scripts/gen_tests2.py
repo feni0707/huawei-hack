@@ -306,6 +306,28 @@ def gen_sorted_big(rng, n):
     return b.cmds
 
 
+def gen_concat(rng, n):
+    """Склейка 2–3 сегментов разных генераторов (как фазы в тесте 14): проверка адаптации при смене режима."""
+    import gen_tests as g1
+    pool = [g1.gen_sorted_groups, g1.gen_alternating, g1.gen_random_bursts, g1.gen_phases, g1.gen_periodic,
+            gen_twophase, gen_sorted2, gen_sawtooth, gen_bimodal, gen_fifo, gen_lifo, gen_desc]
+    k = rng.choice([2, 2, 3])
+    sizes = [max(500, n // k)] * k
+    cmds = []
+    placed = 0
+    for sz in sizes:
+        fn = rng.choice(pool)
+        seg = fn(random.Random(rng.random()), sz)
+        cnt = 0
+        for c in seg:
+            if c > 0:
+                cmds.append(c); cnt += 1
+            else:
+                cmds.append(-((-c) + placed))
+        placed += cnt
+    return cmds[:200000]
+
+
 def gen_tiny(rng, n):
     # n игнорируется: размер выбирается внутри (6..24 команд)
     size = rng.randint(6, 24)
@@ -330,6 +352,7 @@ CLASSES = {
     "lifo": (gen_lifo, [20000, 60000]),
     "desc": (gen_desc, [5000, 9000]),
     "sortedbig": (gen_sorted_big, [60000, 120000, 200000]),
+    "concat": (gen_concat, [12000, 30000, 60000]),
     "tiny": (gen_tiny, [0]),
 }
 

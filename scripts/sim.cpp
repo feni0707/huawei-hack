@@ -172,7 +172,7 @@ int main(int argc, char** argv) {
                 double val = atof(kv.substr(q2 + 1).c_str());
                 if (f == "hyst") engineParams().hyst = val; else if (f == "absMargin") engineParams().absMargin = (int)val;
                 else if (f == "dwell") engineParams().dwell = (int)val; else if (f == "every") engineParams().every = (int)val; else if (f == "gamma") engineParams().gamma = val; else if (f == "qwin") engineParams().qwin = (int)val; else if (f == "qq") engineParams().qq = val;
-                else if (f == "hystA") engineParams().hystArena = val; else if (f == "fast") engineParams().fast = val;
+                else if (f == "hystA") engineParams().hystArena = val; else if (f == "hystAA") engineParams().hystAA = val; else if (f == "fast") engineParams().fast = val;
                 else if (f == "dwellFast") engineParams().dwellFast = (int)val; else if (f == "startCmds") engineParams().startCmds = (int)val;
                 else fprintf(stderr, "unknown eng field %s\n", f.c_str());
                 st = e + 1;
@@ -205,6 +205,7 @@ int main(int argc, char** argv) {
         else if (a == "--csv") CSV = argv[++i];
         else if (a == "--dbgswitch") dbgSwitch() = true;
         else if (a == "--oracle") ORACLE = true;
+        else if (a == "--dbgscore") dbgScore() = atoi(argv[++i]);
         else if (a == "--lean") leanEnabled() = true;
         else if (a == "--fam") g_famMask = (int)strtol(argv[++i], nullptr, 0);
         else if (a == "--nh") g_nhLimit = atoi(argv[++i]);

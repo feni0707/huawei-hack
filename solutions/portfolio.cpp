@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <set>
 #include <string>
@@ -416,17 +417,19 @@ struct Alloc {
 // Качество семейства оценивается онлайн (префиксная кросс-энтропия с затуханием); для прогноза берётся лучшее.
 // Пространства ключей маленькие и плотные — таблицы без хеширования.
 static inline float fastLog(float x) {   // натуральный логарифм, погрешность ~1e-3 (достаточно для сравнения семейств)
-    union { float f; uint32_t i; } u = {x};
-    float e = (float)((int)(u.i >> 23) - 127);
-    u.i = (u.i & 0x007FFFFF) | 0x3F800000;   // мантисса в [1,2)
-    float m = u.f;
+    uint32_t i;
+    std::memcpy(&i, &x, sizeof i);
+    float e = (float)((int)(i >> 23) - 127);
+    i = (i & 0x007FFFFF) | 0x3F800000;       // мантисса в [1,2)
+    float m;
+    std::memcpy(&m, &i, sizeof m);
     float lg2 = e + (-0.34484843f * m + 2.02466578f) * m - 0.67487759f;
     return lg2 * 0.69314718f;
 }
 
 struct Predictor {
-    static const int NH = 8;                  // горизонты H_j = 8 * 4^j команд (до 131072)
-    static const int NF = 15;                 // семейства признаков
+    static constexpr int NH = 8;              // горизонты H_j = 8 * 4^j команд (до 131072)
+    static constexpr int NF = 15;             // семейства признаков
     static int H(int j) { return 8 << (2 * j); }
     struct Cell { float a = 0, n = 0; };
     struct Entry { Cell c[NH]; };
@@ -561,6 +564,7 @@ struct EngineParams {   // параметры выбора лидера (сте�
     double qq = 0.25;   // квантиль
     int every = 8;      // оценивать лидера раз в столько укладок
     double hystArena = 0.03;  // гистерезис при переключении НА политику с аренами
+    double hystAA = 0.03;     // ... если и текущая политика с аренами (переключение арена -> арена)
     int startCmds = 60;       // первые startCmds команд ведёт политика startName (хороша на крошечных «головоломках»), затем — политика 0
     double fast = 0.06;       // при выигрыше больше fast (доля оценки) переключаемся, не дожидаясь dwell
     int dwellFast = 40;       // ... но не чаще раза в dwellFast укладок
@@ -568,6 +572,7 @@ struct EngineParams {   // параметры выбора лидера (сте�
 static EngineParams& engineParams() { static EngineParams ep; return ep; }
 static bool& dbgSwitch() { static bool b = false; return b; }
 static int g_famMask = -1, g_nhLimit = -1;   // стенд: ограничения предсказателя для замеров (в бою не используются)
+static int& dbgScore() { static int v = 0; return v; }   // стенд: печатать оценки политик раз в dbgScore укладок
 static bool& leanEnabled() { static bool b = true; return b; }   // стенд выключает (CPU-время процесса там общее для всех тестов)
 #ifdef SIM
 // Оракул времени смерти (только стенд): death[pid] = индекс команды удаления (или большое число)
@@ -675,8 +680,13 @@ struct Engine {
                 int best = cur;
                 double sBest = score(cur, Lq), sCur = sBest;
                 for (int k = 0; k < NPOL; k++) { double sk = score(k, Lq); if (sk < sBest) { sBest = sk; best = k; } }
+                if (dbgScore() && placed % dbgScore() == 0) {
+                    fprintf(stderr, "t=%d cur=%s Lq=%d scores:", cmds, POLS[cur].name, Lq);
+                    for (int k = 0; k < NPOL; k++) fprintf(stderr, " %.0f", score(k, Lq));
+                    fputc(10, stderr);
+                }
                 double lead = sCur > 0 ? (sCur - sBest) / sCur : 0;
-                double need = POLS[best].js >= 0 ? ep.hystArena : ep.hyst;
+                double need = POLS[best].js >= 0 ? (POLS[cur].js >= 0 ? ep.hystAA : ep.hystArena) : ep.hyst;
                 if (best != cur && lead > need && (sinceSwitch >= ep.dwell || lead > ep.fast) && sCur - sBest > ep.absMargin) {
                     if (dbgSwitch()) {
                         fprintf(stderr, "t=%d switch %s -> %s  trench: real=%d", cmds, POLS[cur].name, POLS[best].name, real.trench);
@@ -701,8 +711,10 @@ struct Engine {
 
 #ifndef SIM
 // ---------------------------------------------------------------- ввод-вывод (боевой режим)
-#ifdef _MSC_VER
+#if defined(_MSC_VER)
 #define GETC _getchar_nolock
+#elif defined(_WIN32)
+#define GETC getchar
 #else
 #define GETC getchar_unlocked
 #endif
