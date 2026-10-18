@@ -25,9 +25,9 @@ typedef long long ll;
 //      0  1      2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19
 // P13 «крошечная траншея» (T < P13): точное попадание, иначе самая большая дыра; P32 — штраф точного
 //      попадания у соседа с высокой долей смертей его длины (только в этом режиме)
-// P33=1 — правило P15 только вне потоков
+// P33=1 — правило P15 только вне потоков; P36 — мин. доля редкого значения признака для каппы
 static double P[40] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.5, 2, 0, 3, 60, 0, 5, 0, 3, 4, 0,
-                       400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 1};
+                       400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 1, 0, 0, 0.3, 0, 0.99};
 
 // ---------------------------------------------------------------- аллокатор
 // Свободные промежутки: граничные метки (склейка за O(1)) + корзины по точной длине (< NB) + set для больших.
@@ -136,6 +136,7 @@ struct Alloc {
     std::vector<signed char> stream;
     int F = 0;                        // правая граница роста; F == T — обычный режим
     double bVol = 0;                  // затухающий объём укладок потока B (для размера участка)
+    double fbVol = 0;                 // то же, но только укладки B к границе роста
     std::vector<unsigned char> feat;  // биты признаков при рождении: bit0 — чётность индекса в серии равных длин, bit1 — чётность PID
     int runIdx = 0, lastL = 0, curRun = 0;
     std::vector<int> runOf;           // номер серии равных длин по PID
@@ -185,6 +186,7 @@ struct Alloc {
         if (coTot[f] < P[21]) return 0;
         double b0 = birthV[f][0], b1 = birthV[f][1], bt = b0 + b1;
         if (bt <= 0) return 0;
+        if (std::min(b0, b1) < P[36] * bt) return 0;   // признак почти константа — каппа вырождена
         double e = (b0 * b0 + b1 * b1) / (bt * bt);   // ожидаемая доля совпадений при независимости
         double o = coSame[f] / coTot[f];
         return e >= 1 ? 0 : (o - e) / (1 - e);
@@ -361,6 +363,8 @@ struct Alloc {
             int fl = F - fgs;
             int chunk = (int)P[20];
             if (P[26] > 0) chunk = std::min(chunk, std::max(L, (int)(P[26] * bVol)));
+            if (P[35] > 0) chunk = std::min(chunk, std::max(2 * L, (int)(P[35] * T)));   // не больше доли траншеи
+            if (P[37] > 0 && st == 1) chunk = std::min(chunk, std::max(L, (int)(P[37] * fbVol)));
             if (fl >= L) {
                 D = st == 1 ? F - L : fgs;
                 takeFrom(fgs, D, L);
@@ -392,6 +396,7 @@ struct Alloc {
             fprintf(stderr, "place pid=%d L=%d st=%d D=%d N=%lld gap=%s bs=%d F=%d T=%lld\n", pid, L, st, D, N, useGap ? "hole" : "front", bs, F, T);
 #endif
         for (int i = 0; i < L; i++) owner[D + i] = pid;
+        fbVol = fbVol * P[38] + ((st == 1 && !useGap) ? L : 0);
         pos.push_back(D); len.push_back(L); alive.push_back(1); birthL[L] += 1; aliveCntL[L]++; aliveTot++;
         if ((int)aliveBit.size() <= pid) aliveBit.resize(std::max<size_t>(pid + 1, aliveBit.size() * 2 + 16), 0), rebuildBit();
         bitAdd(pid, 1);
