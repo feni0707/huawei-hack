@@ -6,6 +6,7 @@
   alternating   — почти строгое чередование «уложить / удалить недавнюю», доминируют 2–3 длины (как 8, 13, 12)
   random_bursts — случайные длины (короткие 1..7 часты), пачки удалений свежих и старых труб (как 11, 15)
   phases        — длинная фаза коротких труб без удалений, смешанные фазы, в конце длинные трубы (как 14)
+  stress        — (только явно, --class stress) крайние случаи памяти: 200 000 длинных труб почти без удалений
   two_phase     — короткие, затем только длинные; во 2-й фазе удаляются свежие длинные и старые короткие (как 11/15)
   periodic      — периодический паттерн коротких длин, выборочные удаления по смещениям в периоде,
                   затем дозаполнение «уложить, уложить, удалить» (как 10)
@@ -313,6 +314,18 @@ def gen_two_phase(rng, n):
     return b.cmds
 
 
+def gen_stress(rng, n):
+    """Крайние случаи для памяти/времени: только длинные трубы почти без удалений (траншея до 8·10^6 м)."""
+    b = Builder(n)
+    p_del = rng.choice([0.0, 0.0, 0.05])
+    lo = rng.choice([40, 30, 1])
+    while b.room():
+        b.place(rng.randint(lo, MAX_LEN))
+        if b.alive and b.room() and rng.random() < p_del:
+            b.remove_old(rng)
+    return b.cmds
+
+
 CLASSES = {
     "sorted_groups": (gen_sorted_groups, [2000, 7500, 9000]),
     "alternating": (gen_alternating, [1500, 6500, 10000]),
@@ -321,6 +334,8 @@ CLASSES = {
     "periodic": (gen_periodic, [3000, 10000]),
     "two_phase": (gen_two_phase, [10000, 50000, 200000]),
 }
+# Не входит в 'all' (большие файлы): python3 scripts/gen_tests.py --class stress --count 3
+EXTRA = {"stress": (gen_stress, [200000])}
 
 
 def validate(cmds):
@@ -359,6 +374,7 @@ def main():
     args = ap.parse_args()
 
     names = list(CLASSES) if args.cls == "all" else [args.cls]
+    CLASSES.update(EXTRA)
     for name in names:
         if name not in CLASSES:
             sys.exit(f"unknown class {name!r}; choose from: {', '.join(CLASSES)}")
