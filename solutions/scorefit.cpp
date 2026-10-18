@@ -23,7 +23,7 @@ typedef long long ll;
 // P21 мин. число пар удалений для включения, P22 порог каппы, P23 затухание рождений, P24 затухание пар
 // P15 мёртвый остаток >= P15 — в хвост (0 выкл), P16 штраф мёртвого остатка с учётом риска смерти соседей
 //      0  1      2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19
-static double P[32] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 3, 4, 0,
+static double P[32] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.5, 2, 0, 3, 0, 0, 0, 0, 3, 4, 0,
                        400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98};
 
 // ---------------------------------------------------------------- аллокатор
@@ -133,6 +133,7 @@ struct Alloc {
     double birthV[NF][2] = {{0}}, deathV[NF][2] = {{0}};
     int lastDelPid = 0; bool lastWasDel = false;
     int curFeat = -1;
+    double bornLab[2] = {0, 0}, diedLab[2] = {0, 0};   // проверка прогноза: смерти среди помеченных A/B
     // ---- риск смерти соседа по возрасту
     // aliveBit — дерево Фенвика по PID (живые), deathAge[b] — число смертей в возрасте [2^b-1, 2^(b+1)-1)
     std::vector<int> aliveBit;
@@ -235,6 +236,7 @@ struct Alloc {
         int st = chooseStream(pid, L);
         stream.push_back((signed char)st);
         bVol = bVol * P[27] + (st == 1 ? L : 0);
+        if (st >= 0) bornLab[st] += 1;
 #ifdef SIM
         if (getenv("SFDBG") && pid % atoi(getenv("SFDBG")) == 0)
             fprintf(stderr, "pid=%d L=%d feat=%d st=%d k0=%.3f k1=%.3f tot=%.1f,%.1f F=%d T=%lld\n", pid, L, feat[pid], st, kappa(0), kappa(1), coTot[0], coTot[1], F, T);
@@ -299,6 +301,8 @@ struct Alloc {
         ll N = 0; int D;
         bool useGap = bgs >= 0 && bestC < P[7] + 1e17 * (P[7] == 0);
         if (st == 1 && P[12] == 2) useGap = false;
+        if (st == 1 && P[12] == 3 && bornLab[1] >= 20 && bornLab[0] >= 20 &&
+            diedLab[1] / bornLab[1] - diedLab[0] / bornLab[0] > P[9]) useGap = false;   // прогноз подтвердился: B — к границе роста
         if (useGap && P[14] == 5 && bestC > P[19]) useGap = false;   // дыра не стоит того — в хвост
         // P15: если лучший промежуток оставляет мёртвый остаток >= P15 — лучше в хвост
         if (useGap && P[15] > 0) {
@@ -370,6 +374,7 @@ struct Alloc {
         int e = freeRange(d, l);
         if (d == F) F = e;
         unsigned char fv = feat[pid];
+        if (stream[pid] >= 0) diedLab[stream[pid]] += 1;
         for (int f = 0; f < NF; f++) {
             int v = (fv >> f) & 1;
             deathV[f][v] += 1;
