@@ -231,7 +231,7 @@ int main(int argc, char** argv) {
                 else if (f == "tieHigh") pp.tieHigh = val; else if (f == "tailFirst") pp.tailFirst = val; else if (f == "sel") pp.sel = (Sel)val;
                 else if (f == "tau") pp.tau = (float)val / 100.0f; else if (f == "sw0") pp.sw0 = (float)val / 100.0f;
                 else if (f == "swsmall") pp.swsmall = (float)val / 100.0f; else if (f == "swsize") pp.swsize = (float)val / 100.0f;
-                else if (f == "wkap") pp.wkap = (float)val / 100.0f;
+                else if (f == "wkap") pp.wkap = (float)val / 100.0f; else if (f == "swaddr") pp.swaddr = (float)val / 100.0f; else if (f == "swdist") pp.swdist = (float)val / 100.0f;
                 else fprintf(stderr, "unknown field %s\n", f.c_str());
                 st = e + 1;
             }

@@ -82,6 +82,7 @@ struct Pol {
     float tau = 0.5f; // класс T, если предсказанная вероятность смерти >= tau
     float sw0 = 0, swsmall = 0, swsize = 0;  // SCORED/WFN: бонус точного попадания, штраф за малый остаток (< th), вес размера дыры
     float wkap = 1e9f;                       // WFN: если лучшая стоимость > wkap * L — труба идёт в хвост
+    float swaddr = 0, swdist = 0;            // SCORED: вес относительного адреса дыры (a/trench) и расстояния до последнего освобождения
 };
 
 static const Pol POLS_INIT[] = {
@@ -205,6 +206,7 @@ struct Alloc {
     long long liveT = 0;                  // суммарная длина живых труб класса T
     double emaT = 0;                      // скользящее среднее длины недавно уложенных T-труб
     const Pol* curPol = nullptr;
+    int lastFreed = 0;                    // адрес последней освобождённой трубы
     const double* W = nullptr;            // таблица «ожидаемого непригодного остатка» W[s], s = 0..WMAX (для WFN)
 
     Alloc() { pos.assign(1, -1); len.assign(1, 0); cls.assign(1, 0); }
@@ -281,6 +283,11 @@ struct Alloc {
                 double c = pp->swsize * sI;
                 if (r == 0) c -= pp->sw0;
                 else if (r < th) c += pp->swsmall * (th - r);
+                if (pp->swaddr != 0 || pp->swdist != 0) {
+                    int ad = topAddr(H, startTab, sI, tg);
+                    double tr = trench > 0 ? trench : 1;
+                    c += pp->swaddr * (ad / tr) + pp->swdist * (std::abs(ad - lastFreed) / tr);
+                }
                 if (c < bestC) { bestC = c; bs = sI; }
             }
             if (mm >> 40 & 1) {
@@ -388,6 +395,7 @@ struct Alloc {
     int remove(int pid) {
         int p = pos[pid], l = len[pid];
         int tag = cls[pid];
+        lastFreed = p;
         pos[pid] = -1;
         live -= l;
         if (cls[pid]) liveT -= l;
