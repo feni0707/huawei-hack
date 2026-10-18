@@ -27,10 +27,11 @@ typedef long long ll;
 //      попадания у соседа с высокой долей смертей его длины (только в этом режиме)
 // P33=1 — правило P15 только вне потоков, P33=2 — промежутки с мёртвым остатком ≥ P15 исключаются из кандидатов (вне потоков); P36 — мин. доля редкого значения признака для каппы;
 // P39 — штраф замуровывания, только если s + len(соседа) встречается среди недавних укладок с долей ≥ P39
-static double P[48] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.5, 2, 0, 3, 60, 0, 4, 0, 3, 4, 0,
-                       400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 2, 0, 0, 0.3, 0, 0.99, 0.05,
-                       0, 0, 0, 0, 1};
+static double P[64] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.5, 2, 0, 3, 60, 6, 0, 0, 3, 4, 0, 400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 2, 0, 0, 0.3, 0, 0.99, 0.05, 0, 0, 0, 0, 1, 0, 0, 0, 8, 0.999, 1.5};
 
+// P14=6 (по умолчанию): линейная оценка кандидатов вне потоков, веса LW (env SFW="w0 w1 ..." — переопределить);
+// старое поведение (best fit + правила) — SF="14=0 15=4"
+static double LW[24] = {1, -38.8, -22.4, 13.5, 47, -203, 107, -7.25, 2.78, 2.26, -8.96, 23.4, 1.05e+03, 69, 0, 46.7, 27.9, 8.7, 0, 0};   // CMA-ES lin2
 // ---------------------------------------------------------------- аллокатор
 // Свободные промежутки: граничные метки (склейка за O(1)) + корзины по точной длине (< NB) + set для больших.
 static const int NB = 128;
@@ -168,6 +169,21 @@ struct Alloc {
         double aGE = lo > 0 ? bitSum(lo) : 0;
         return dGE + aGE > 0 ? dGE / (dGE + aGE) : 0.5;
     }
+    // локальная частота недавних смертей по корзинам PID (окно удалений, ползущее по PID — как в 15)
+    std::vector<double> bdv; std::vector<int> bdt, aliveB; int nDel = 0;
+    void bEnsure(int b) { if ((int)bdv.size() <= b) { bdv.resize(b + 1, 0); bdt.resize(b + 1, 0); aliveB.resize(b + 1, 0); } }
+    double rateB(int p) const {
+        if (p <= 0) return 0;
+        int b = p >> (int)P[48];
+        if (b >= (int)bdv.size()) return 0;
+        double v = bdv[b] * std::pow(P[49], nDel - bdt[b]);
+        return v / std::max(1, aliveB[b]);
+    }
+    void bOnBirth(int p) { int b = p >> (int)P[48]; bEnsure(b); aliveB[b]++; }
+    void bOnDeath(int p) {
+        int b = p >> (int)P[48]; bEnsure(b); aliveB[b]--; nDel++;
+        bdv[b] = bdv[b] * std::pow(P[49], nDel - bdt[b]) + 1; bdt[b] = nDel;
+    }
     double birthL[MAXL + 1] = {0}, deathL[MAXL + 1] = {0};
     double pdieLen(int p) const { if (p <= 0) return 0; int l = len[p]; return (deathL[l] + 0.5) / (birthL[l] + 1); }
     // интенсивность смертей по длине: доля недавних удалений длины l / доля живых длины l
@@ -244,6 +260,13 @@ struct Alloc {
             return st == 1 ? gs + r : gs;
         }
         if (P[8] == 4) { if (hz2(lp) > hz2(rp)) return gs + r; return gs; }
+        if (P[8] == 5) {
+            double a = rateB(lp), b = rateB(rp);
+            if (a > P[50] * b && a > 0) return gs + r;   // остаток — к соседу с большей локальной частотой смертей
+            if (b > P[50] * a && b > 0) return gs;
+            if (lp > rp) return gs + r;
+            return gs;
+        }
         if (P[8] == 1) { if (lp > rp) return gs + r; }
         else if (P[8] == 3) return gs + r;
         return gs;
@@ -294,6 +317,33 @@ struct Alloc {
                 cst = Wf(s - L) - Wf(s) + 1e-3 * (s - L);
             } else if (P[14] == 4) {
                 cst = -(double)gs;                          // last fit
+            } else if (P[14] == 6 && st < 0) {
+                int r = s - L;
+                int lp = pidLeftOf(gs), rp = pidRightOf(gs + s);
+                double hl = hazard(lp), hr = hazard(rp);
+                double hside = lp > rp ? hl : hr;          // остаток — к более молодому соседу
+                bool dead = r > 0 && r < m;
+                double dr = (r >= 1 && r <= MAXL && cntTot > 0) ? cnt[r] / cntTot : 0;
+                double ds = (s <= MAXL && cntTot > 0) ? cnt[s] / cntTot : 0;
+                double hzn = std::max(hzRate(lp), hzRate(rp));
+                cst = LW[0] * r + LW[1] * (r == 0) + LW[2] * dead + LW[3] * (dead ? r : 0) + LW[4] * (r >= m)
+                    + LW[5] * dr + LW[6] * ds + LW[7] * (r > 0 ? hside : 0) + LW[8] * (dead ? r * (1 - std::max(hl, hr)) : 0)
+                    + LW[9] * (r == 0 ? hzn : 0) + LW[10] * std::log(1.0 + (double)bucketSize(s)) + LW[11] * std::log((double)s / L)
+                    + LW[12] * (dead && r >= 4) + LW[15] * (r == 0 ? std::min(hl, hr) : 0) + LW[16] * (r > 0 && r < 2 * m && !dead);
+                if (LW[18] != 0 && r > 0) cst += LW[18] * ds / (1.0 + (double)bucketSize(s));   // ломаем дефицитный размер
+                if (LW[19] != 0 && r > 0) cst += LW[19] * dr / (1.0 + (double)bucketSize(r));   // остаток — дефицитного размера
+                if (r == 0 && LW[17] != 0) {   // исходный штраф «замуровывания» (как P17/P39)
+                    double h = 0;
+                    int nb[2] = {lp, rp};
+                    for (int k = 0; k < 2; k++) {
+                        if (nb[k] <= 0) continue;
+                        int mg = s + len[nb[k]];
+                        if (mg > MAXL || cnt[mg] < P[39] * cntTot) continue;
+                        h = std::max(h, hzRate(nb[k]));
+                    }
+                    h -= selfHz;
+                    if (h >= 0.5) cst += LW[17] * h;
+                }
             } else {
                 cst = s == L ? -P[5] : fragCost(s - L, m) + P[6] * (s - L);
                 if (P[17] != 0 && s == L) {
@@ -320,6 +370,8 @@ struct Alloc {
                     cst += P[16] * (s - L) * (1 - std::max(hl, hr));
                 }
             }
+            if (P[51] != 0 && st < 0 && s > L) cst -= P[51] * std::max(rateB(pidLeftOf(gs)), rateB(pidRightOf(gs + s)));
+            if (P[52] != 0 && st < 0 && s == L) cst += P[52] * std::max(rateB(pidLeftOf(gs)), rateB(pidRightOf(gs + s)));
             if (P[29] != 0 && st >= 0 && (kin(pidLeftOf(gs), st) || kin(pidRightOf(gs + s), st))) cst -= P[29];
             if (P[40 - 1 + 0] != 0 && false) {}
             if (P[15] > 0 && P[33] == 2 && st < 0 && s > L && s - L < m && s - L >= P[15]) cst = 1e17;   // мёртвый остаток — не кандидат
@@ -384,6 +436,13 @@ struct Alloc {
                 if (r * keep >= (P[34] > 0 ? P[34] * m : P[15])) useGap = false;
             }
         }
+        if (useGap && P[14] == 6 && st < 0) {
+            int tl = (int)(T - tailStart());
+            if (tl >= L && LW[13] < bestC) useGap = false;   // хвост — только без докопки
+        }
+        // P45: лучшая дыра оставит мёртвый остаток (>= P46), а в уже выкопанном хвосте труба помещается — в хвост
+        if (useGap && P[45] != 0 && st < 0 && bs > L && bs - L < m && bs - L >= std::max(1.0, P[46]) &&
+            T - tailStart() >= L) useGap = false;
         if (useGap) {
             D = chooseSide(bgs, bs, L, st);
             takeFrom(bgs, D, L);
@@ -429,9 +488,11 @@ struct Alloc {
 #endif
         for (int i = 0; i < L; i++) owner[D + i] = pid;
         fbVol = fbVol * P[38] + ((st == 1 && !useGap) ? L : 0);
+        bOnBirth(pid);
         pos.push_back(D); len.push_back(L); alive.push_back(1); birthL[L] += 1; aliveCntL[L]++; aliveTot++;
-        if ((int)aliveBit.size() <= pid) aliveBit.resize(std::max<size_t>(pid + 1, aliveBit.size() * 2 + 16), 0), rebuildBit();
-        bitAdd(pid, 1);
+        // после расширения rebuildBit уже учёл pid (alive[pid] = 1) — второй bitAdd давал «призрачных» живых
+        if ((int)aliveBit.size() <= pid) { aliveBit.resize(std::max<size_t>(pid + 1, aliveBit.size() * 2 + 16), 0); rebuildBit(); }
+        else bitAdd(pid, 1);
         observe(L); nPlaced++;
         lastWasDel = false;
         return {N, D};
@@ -444,7 +505,7 @@ struct Alloc {
     std::vector<char> alive;
     ll remove(int pid) {
         int d = pos[pid], l = len[pid];
-        alive[pid] = 0; bitAdd(pid, -1); deathL[l] += 1;
+        alive[pid] = 0; bitAdd(pid, -1); deathL[l] += 1; bOnDeath(pid);
         for (int k = 1; k <= MAXL; k++) recDel[k] *= P[31];
         recDelTot = recDelTot * P[31] + 1; recDel[l] += 1; aliveCntL[l]--; aliveTot--;
         deathAge[ageBucket((int)pos.size() - 1 - pid)] += 1;
@@ -467,6 +528,7 @@ struct Alloc {
         lastWasDel = true; lastDelPid = pid;
         return d;
     }
+    size_t bucketSize(int s) const { return s < NB ? bucket[s].size() : 0; }
     size_t gapCount() const { size_t c = big.size(); for (int s = 0; s < NB; s++) c += bucket[s].size(); return c; }
     void holeStats(ll& holes, ll& small) const {
         holes = small = 0; int ts = tailStart();
@@ -505,8 +567,12 @@ int main(int argc, char** argv) {
         char* p = (char*)s;
         while (*p) {
             char* q; long i = strtol(p, &q, 10); if (q == p || *q != '=') break;
-            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 48) P[i] = v; p = q;
+            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 64) P[i] = v; p = q;
         }
+    }
+    if (const char* s = getenv("SFW")) {
+        char* p = (char*)s; int i = 0;
+        while (*p && i < 24) { char* q; double v = strtod(p, &q); if (q == p) break; LW[i++] = v; p = q; while (*p == ',' || *p == ' ') p++; }
     }
     bool quiet = getenv("SFQ") != nullptr;
     if (getenv("SFIMPORT")) {
@@ -643,6 +709,17 @@ static int putNum(char* b, ll v) {
     return n;
 }
 int main() {
+    if (const char* s = getenv("SF")) {   // те же ручки, что в SIM: "i=v i=v ..."
+        char* p = (char*)s;
+        while (*p) {
+            char* q; long i = strtol(p, &q, 10); if (q == p || *q != '=') break;
+            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 64) P[i] = v; p = q;
+        }
+    }
+    if (const char* s = getenv("SFW")) {
+        char* p = (char*)s; int i = 0;
+        while (*p && i < 24) { char* q; double v = strtod(p, &q); if (q == p) break; LW[i++] = v; p = q; while (*p == ',' || *p == ' ') p++; }
+    }
     Alloc A;
     int c; char ob[64];
     while (readInt(c)) {

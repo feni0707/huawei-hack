@@ -4,23 +4,27 @@
 // Эксперименты (все ручки и оффлайн-симулятор): solutions/scorefit_lab.cpp — ответы этой версии с ним совпадают.
 //
 // Стратегия:
-//   1. Best fit: из свободных промежутков, куда помещается труба, берём самый короткий (среди равных — левый).
-//      Хвост траншеи (промежуток, упирающийся в конец) — в последнюю очередь; докопка минимальная.
-//   2. Остаток в промежутке оставляем рядом с более молодым соседом (он скорее умрёт, и остаток сольётся).
-//   3. Потоки. Онлайн ищем признак, носители одного значения которого умирают вместе (каппа совпадения
+//   1. Кандидаты: по одному промежутку каждой длины (самый левый) + самый короткий из больших; хвост траншеи
+//      (промежуток, упирающийся в конец) — отдельно; докопка минимальная и только если ничто не подходит.
+//   2. Вне потоков кандидат оценивается линейной функцией признаков (gapCost, веса LW): остаток r, точное
+//      попадание, «мёртвый» остаток (короче минимальной недавней длины), доля длин r и s среди недавних укладок
+//      (не ломать дыру ходового размера, оставлять остаток ходового размера), риск соседей по возрасту и др.
+//      Веса подобраны CMA-ES на сгенерированных классах и проверены на независимых наборах
+//      (docs/variants/scorefit.md). Если лучший кандидат дороже LW[13], а в хвосте место есть без докопки — хвост.
+//   3. Остаток в промежутке оставляем рядом с более молодым соседом (он скорее умрёт, и остаток сольётся).
+//   4. Потоки. Онлайн ищем признак, носители одного значения которого умирают вместе (каппа совпадения
 //      признака у соседних удалений пачки). Признаки: чётность индекса в серии равных длин, чётность PID,
 //      «индекс в серии mod 3 = k».
 //      Если нашёлся — поток A кладём к левому краю «граничного» промежутка, поток B растёт влево от правой
 //      границы роста F (участками по 400 м). Какая бы половина ни умерла, освобождается сплошной кусок.
 //      Если прогноз «B умирает чаще» подтвердился на помеченных трубах, B идёт сразу к границе роста.
-//   4. Мелкие правила: не «замуровывать» точным попаданием дыру рядом с трубой, чья длина сейчас часто
-//      удаляется (если слитая дыра — частая длина); промежутки, где останется мёртвый остаток (короче
-//      минимальной недавней длины) ≥ 4 м, не рассматриваем (вне потоков);
-//      в крошечной траншее (< 60 м) — точное попадание, иначе самая большая дыра.
+//      В потоках — best fit и штраф «замуровывания» дыры рядом с трубой, чья длина сейчас часто удаляется.
+//   5. В крошечной траншее (< 60 м) — точное попадание, иначе самая большая дыра.
 //
 // Код написан с оглядкой на перенос на Cangjie: без std::set/map/priority_queue и лямбд — кучи и
 // постраничные массивы сделаны вручную, все структуры — массивы.
 #include <cstdio>
+#include <cmath>
 #include <vector>
 #include <unistd.h>
 
@@ -29,6 +33,15 @@ typedef long long ll;
 static const int NB = 128;     // промежутки короче NB — в корзинах по точной длине, длиннее — в общей куче
 static const int MAXL = 40;    // максимальная длина трубы
 static const int CHUNK = 400;  // участок, который докапывается под поток B, м
+
+// Веса линейной оценки кандидата (вне потоков). Подобраны CMA-ES на сгенерированных классах (two_phase,
+// alternating, lifo_mix, phases, sorted_groups, periodic; scripts/cmaes_weights.py) и проверены на независимых наборах.
+// Признаки — см. gapCost: 0 остаток r, 1 точное попадание, 2 мёртвый остаток, 3 r·[мёртвый], 4 живой остаток,
+// 5 доля длины r среди недавних укладок, 6 то же для длины s, 7 риск соседа со стороны остатка, 8 r·[мёртвый]·
+// P(оба соседа выживут), 9 точное попадание: max интенсивность смертей соседей, 10 log(1+число дыр длины s),
+// 11 log(s/L), 12 мёртвый остаток ≥ 4, 13 цена хвоста без докопки, 15 точное: min риск соседей,
+// 16 живой остаток < 2m, 17 штраф «замуровывания», 18/19 дефицит размера s / r.
+static const double LW[20] = {1, -38.8, -22.4, 13.5, 47, -203, 107, -7.25, 2.78, 2.26, -8.96, 23.4, 1.05e+03, 69, 0, 46.7, 27.9, 8.7, 0, 0};
 
 static inline double dmax(double a, double b) { return a > b ? a : b; }
 static inline double dmin(double a, double b) { return a < b ? a : b; }
@@ -92,6 +105,7 @@ struct Alloc {
     // Корзины: bucket[s] — начала промежутков длины s (куча по адресу); big — ключ len·2^32 + start.
     // Удаление ленивое: элемент действителен, только если tag[start] всё ещё равен его длине.
     Heap bucket[NB], big;
+    int gapCnt[NB];                      // точное число промежутков длины s < NB
 
     std::vector<int> pos, len;           // по PID
     // признаки при рождении: bit0 — чётность индекса в серии равных длин, bit1 — чётность PID,
@@ -121,6 +135,9 @@ struct Alloc {
         pos.push_back(-1); len.push_back(0); feat.push_back(0); stream.push_back(-1);
         for (int l = 0; l <= MAXL; l++) { cnt[l] = birthL[l] = deathL[l] = recDel[l] = 0; aliveCntL[l] = 0; }
         bornLab[0] = bornLab[1] = diedLab[0] = diedLab[1] = 0;
+        for (int i = 0; i < NB; i++) gapCnt[i] = 0;
+        for (int i = 0; i < 24; i++) deathAge[i] = 0;
+        aliveBit.assign(BITN, 0);
         for (int f = 0; f < NF; f++) {
             coSame[f] = coTot[f] = 0;
             for (int v = 0; v < 2; v++) birthV[f][v] = deathV[f][v] = 0;
@@ -132,9 +149,9 @@ struct Alloc {
     void ensure(ll n) { tag.grow(n + 1); owner.grow(n + 1); }
     void addGap(int s, int l) {
         tag.set(s, l); tag.set(s + l, -s - 1);
-        if (l < NB) bucket[l].push(s); else big.push(((ll)l << 32) | s);
+        if (l < NB) { bucket[l].push(s); gapCnt[l]++; } else big.push(((ll)l << 32) | s);
     }
-    void delGap(int s) { int l = tag.get(s); tag.set(s, 0); tag.set(s + l, 0); }
+    void delGap(int s) { int l = tag.get(s); if (l < NB) gapCnt[l]--; tag.set(s, 0); tag.set(s + l, 0); }
     int freeRange(int s, int l) {   // освободить [s, s+l) со склейкой соседей; вернуть конец склеенного
         int e = s + l;
         if (e < T && tag.get(e) > 0) { int r = tag.get(e); delGap(e); e += r; }
@@ -205,6 +222,25 @@ struct Alloc {
     }
     double hzRate(int p) const { return (p <= 0 || recDelTot < 1) ? 0 : rateOfLen(len[p]); }
 
+    // риск по возрасту: P(труба когда-нибудь умрёт | дожила до своего возраста). Возраст — в укладках;
+    // deathAge[b] — смерти в возрасте [2^b - 1, 2^(b+1) - 1), живые с возрастом ≥ 2^b - 1 — из дерева Фенвика по PID.
+    static const int BITN = 1 << 18;     // > 200 000 укладок
+    std::vector<int> aliveBit;
+    double deathAge[24];
+    void bitAdd(int i, int v) { for (; i < BITN; i += i & -i) aliveBit[i] += v; }
+    int bitSum(int i) const { int r = 0; for (; i > 0; i -= i & -i) r += aliveBit[i]; return r; }
+    static int ageBucket(int a) { int b = 0; while ((2 << b) - 1 <= a && b < 23) b++; return b; }
+    double hazard(int p) const {
+        if (p <= 0) return 0;
+        int cur = (int)pos.size() - 1;
+        int b = ageBucket(cur - p);
+        double dGE = 0;
+        for (int k = b; k < 24; k++) dGE += deathAge[k];
+        int lo = cur - ((1 << b) - 1);
+        double aGE = lo > 0 ? bitSum(lo) : 0;
+        return dGE + aGE > 0 ? dGE / (dGE + aGE) : 0.5;
+    }
+
     // ---- потоки
     double kappa(int f) const {
         if (coTot[f] < 20) return 0;
@@ -250,25 +286,42 @@ struct Alloc {
 
     // стоимость укладки трубы L в промежуток gs длины s (меньше — лучше)
     double gapCost(int gs, int s, int L, int st, int m, double selfHz) const {
-        // мёртвый остаток (короче всех ожидаемых труб) ≥ 4 м — промежуток не кандидат (вне потоков)
-        if (st < 0 && s > L && s - L < m && s - L >= 4) return 1e17;
         if (T < 60) {   // крошечная траншея
             if (s == L) return -1000 + 2000 * dmax(pdieLen(pidLeftOf(gs)), pdieLen(pidRightOf(gs + s)));
             return -s;
         }
-        if (s != L) return s - L;   // best fit
+        int r = s - L;
+        int lp = pidLeftOf(gs), rp = pidRightOf(gs + s);
         // точное попадание «замуровывает» дыру. Плохо, если сосед скоро умрёт (длина его класса сейчас часто
         // удаляется), новая труба живёт дольше, а слитая дыра s + len(соседа) — частая длина среди укладок.
-        double h = 0;
-        int nb[2] = {pidLeftOf(gs), pidRightOf(gs + s)};
-        for (int k = 0; k < 2; k++) {
-            if (nb[k] <= 0) continue;
-            int mg = s + len[nb[k]];
-            if (mg > MAXL || cnt[mg] < 0.05 * cntTot) continue;
-            h = dmax(h, hzRate(nb[k]));
+        double seal = 0;
+        if (r == 0) {
+            double h = 0;
+            int nb[2] = {lp, rp};
+            for (int k = 0; k < 2; k++) {
+                if (nb[k] <= 0) continue;
+                int mg = s + len[nb[k]];
+                if (mg > MAXL || cnt[mg] < 0.05 * cntTot) continue;
+                h = dmax(h, hzRate(nb[k]));
+            }
+            h -= selfHz;
+            if (h >= 0.5) seal = h;
         }
-        h -= selfHz;
-        return h >= 0.5 ? 3 * h : 0;
+        if (st >= 0) return r != 0 ? r : 3 * seal;   // в потоках — best fit
+        // вне потоков — линейная оценка (веса LW)
+        double hl = hazard(lp), hr = hazard(rp);
+        double hside = lp > rp ? hl : hr;          // остаток ляжет к более молодому соседу
+        bool dead = r > 0 && r < m;
+        double dr = (r >= 1 && r <= MAXL && cntTot > 0) ? cnt[r] / cntTot : 0;
+        double ds = (s <= MAXL && cntTot > 0) ? cnt[s] / cntTot : 0;
+        double ns = s < NB ? gapCnt[s] : 0, nr = r < NB ? gapCnt[r] : 0;
+        double c = LW[0] * r + LW[1] * (r == 0) + LW[2] * dead + LW[3] * (dead ? r : 0) + LW[4] * (r >= m)
+                 + LW[5] * dr + LW[6] * ds + LW[7] * (r > 0 ? hside : 0) + LW[8] * (dead ? r * (1 - dmax(hl, hr)) : 0)
+                 + LW[9] * (r == 0 ? dmax(hzRate(lp), hzRate(rp)) : 0) + LW[10] * std::log(1.0 + ns)
+                 + LW[11] * std::log((double)s / L) + LW[12] * (dead && r >= 4) + LW[15] * (r == 0 ? dmin(hl, hr) : 0)
+                 + LW[16] * (r > 0 && r < 2 * m && !dead);
+        if (r > 0) c += LW[18] * ds / (1.0 + ns) + LW[19] * dr / (1.0 + nr);
+        return c + LW[17] * seal;
     }
 
     // ---- команды
@@ -309,6 +362,8 @@ struct Alloc {
         // прогноз «B умирает» подтвердился — B сразу к границе роста
         if (st == 1 && bornLab[1] >= 20 && bornLab[0] >= 20 &&
             diedLab[1] / bornLab[1] - diedLab[0] / bornLab[0] > 0.5) useGap = false;
+        // вне потоков: если лучший промежуток дороже LW[13], а в хвосте место есть без докопки — в хвост
+        if (useGap && st < 0 && T - tailStart() >= L && LW[13] < bestC) useGap = false;
 
         ll N = 0; int D;
         if (useGap) {
@@ -346,6 +401,7 @@ struct Alloc {
         }
         for (int i = 0; i < L; i++) owner.set(D + i, pid);
         pos.push_back(D); len.push_back(L);
+        bitAdd(pid, 1);
         birthL[L] += 1; aliveCntL[L]++; aliveTot++;
         for (int l = 1; l <= MAXL; l++) cnt[l] *= 0.999;
         cntTot = cntTot * 0.999 + 1; cnt[L] += 1;
@@ -356,6 +412,8 @@ struct Alloc {
     ll remove(int pid) {
         int d = pos[pid], l = len[pid];
         deathL[l] += 1;
+        bitAdd(pid, -1);
+        deathAge[ageBucket((int)pos.size() - 1 - pid)] += 1;
         for (int k = 1; k <= MAXL; k++) recDel[k] *= 0.98;
         recDelTot = recDelTot * 0.98 + 1; recDel[l] += 1; aliveCntL[l]--; aliveTot--;
         int e = freeRange(d, l);
