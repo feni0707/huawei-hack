@@ -173,16 +173,32 @@ struct Alloc {
 
 struct Engine {
     Alloc real;
-    int pol = 0;
-    explicit Engine(int p) : pol(p) {}
-    void place(int L, int& N, int& D) { real.place(POLS[pol], L, N, D); }
-    int remove(int pid) { return real.remove(pid); }
+    std::vector<Alloc> sh;   // теневые симуляции чистых политик (пусто в режиме одной политики)
+    int fixed;               // >= 0: одна чистая политика; -1: портфель
+    int cur = 0;
+    double hyst = 0.0;       // гистерезис: переключаться, только если лидер короче текущей на hyst*trench
+
+    explicit Engine(int p = -1) : fixed(p) {
+        if (p < 0) sh.resize(NPOL);
+    }
+    void place(int L, int& N, int& D) {
+        if (fixed >= 0) { real.place(POLS[fixed], L, N, D); return; }
+        for (int k = 0; k < NPOL; k++) { int n, d; sh[k].place(POLS[k], L, n, d); }
+        int best = cur;
+        for (int k = 0; k < NPOL; k++) if (sh[k].trench < sh[best].trench) best = k;
+        if (best != cur && sh[best].trench < sh[cur].trench - hyst * sh[cur].trench) cur = best;
+        real.place(POLS[cur], L, N, D);
+    }
+    int remove(int pid) {
+        for (auto& a : sh) a.remove(pid);
+        return real.remove(pid);
+    }
 };
 
 #ifndef SIM
 // ---------------------------------------------------------------- ввод-вывод (боевой режим)
 int main() {
-    Engine eng(0);
+    Engine eng(-1);
     int c;
     while (scanf("%d", &c) == 1) {
         if (c == 0) return 0;

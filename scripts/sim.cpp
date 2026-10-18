@@ -9,6 +9,7 @@
 #include "../solutions/portfolio.cpp"
 
 #include <chrono>
+#include <memory>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -75,6 +76,7 @@ struct Checker {
 
 static bool CHECK = false;
 static bool DUMP = false;
+static bool TRACE = false;
 static void dumpHoles(const Alloc& a) {
     long long cnt[41] = {0}, cells[41] = {0};
     for (auto& kv : a.byAddr) { int h = std::min(kv.second, 40); cnt[h]++; cells[h] += kv.second; }
@@ -90,7 +92,14 @@ static Result run(const Test& t, F makeEngine) {
     auto t0 = std::chrono::steady_clock::now();
     auto eng = makeEngine();
     Checker ck;
+    size_t ci = 0;
     for (int c : t.cmds) {
+        ci++;
+        if (TRACE && ci % (t.cmds.size() / 20) == 0) {
+            long long hc = 0, small = 0, nh = 0;
+            for (auto& kv : eng->real.byAddr) { hc += kv.second; nh++; if (kv.second <= 7) small += kv.second; }
+            printf("   t=%zu trench=%d live=%lld holes=%lld (%.2f%%) nholes=%lld small<=7:%lld tail=%d\n", ci, eng->real.trench, eng->real.live, hc, 100.0 * hc / eng->real.trench, nh, small, eng->real.trench - eng->real.tailStart);
+        }
         if (c > 0) {
             int N, D;
             eng->place(c, N, D);
@@ -149,6 +158,7 @@ int main(int argc, char** argv) {
         else if (a == "--check") CHECK = true;
         else if (a == "-v") verbose = true;
         else if (a == "--dump") DUMP = true;
+        else if (a == "--trace") TRACE = true;
         else if (a == "--dump") DUMP = true;
         else paths.push_back(a);
     }
@@ -224,7 +234,7 @@ int main(int argc, char** argv) {
         double maxms = 0;
         for (size_t i = 0; i < sd.tests.size(); i++) {
             Result r = mode == "pol" ? run(sd.tests[i], [&] { return std::unique_ptr<Engine>(new Engine(polIdx)); })
-                                     : run(sd.tests[i], [&] { return std::unique_ptr<Engine>(new Engine(0)); });
+                                     : run(sd.tests[i], [&] { return std::unique_ptr<Engine>(new Engine(-1)); });
             if (!r.ok) fprintf(stderr, "INVALID %s test %s: %s\n", sd.name.c_str(), sd.tests[i].name.c_str(), r.err.c_str());
             k[i] = r.kpi; ub[i] = sd.tests[i].ub;
             maxms = std::max(maxms, r.ms);
