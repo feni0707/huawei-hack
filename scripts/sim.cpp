@@ -130,6 +130,7 @@ static Result run(const Test& t, F makeEngine) {
     r.live = eng->real.live;
     r.kpi = r.ok && r.trench ? (double)r.live / r.trench : 0;
     if (DUMP) dumpHoles(eng->real);
+    if (DUMP) printf("   predictor: curJ=%d lastD=%.3f\n", eng->pred.curJ, eng->pred.lastD);
     return r;
 }
 
@@ -172,7 +173,7 @@ int main(int argc, char** argv) {
                 double val = atof(kv.substr(q2 + 1).c_str());
                 if (f == "hyst") engineParams().hyst = val; else if (f == "absMargin") engineParams().absMargin = (int)val;
                 else if (f == "dwell") engineParams().dwell = (int)val; else if (f == "every") engineParams().every = (int)val; else if (f == "gamma") engineParams().gamma = val; else if (f == "qwin") engineParams().qwin = (int)val; else if (f == "qq") engineParams().qq = val;
-                else if (f == "hystA") engineParams().hystArena = val; else if (f == "hystAA") engineParams().hystAA = val; else if (f == "fast") engineParams().fast = val;
+                else if (f == "hystA") engineParams().hystArena = val; else if (f == "hystAA") engineParams().hystAA = val; else if (f == "persist") engineParams().persist = (int)val; else if (f == "fast") engineParams().fast = val;
                 else if (f == "dwellFast") engineParams().dwellFast = (int)val; else if (f == "startCmds") engineParams().startCmds = (int)val;
                 else fprintf(stderr, "unknown eng field %s\n", f.c_str());
                 st = e + 1;
@@ -209,6 +210,7 @@ int main(int argc, char** argv) {
         else if (a == "--lean") leanEnabled() = true;
         else if (a == "--fam") g_famMask = (int)strtol(argv[++i], nullptr, 0);
         else if (a == "--nh") g_nhLimit = atoi(argv[++i]);
+        else if (a == "--mind") g_minD = atof(argv[++i]);
         else if (a == "--pset") {  // --pset idx:field=val[,field=val]  (js, Cdiv, Cmin, Cmax, Tsmall, right, tieHigh, tailFirst, sel)
             std::string v = argv[++i];
             size_t c = v.find(':');

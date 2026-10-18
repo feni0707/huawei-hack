@@ -473,9 +473,11 @@ struct Predictor {
     }
 
     // горизонт, на котором лучшее семейство признаков сильнее всего выигрывает у «общей» вероятности смерти
-    int bestJ() const {
+    double lastD = 0;                         // выигрыш на выбранном горизонте (для отладки/порога)
+    double minD = 0.10;                       // минимальный выигрыш (нат на наблюдение), иначе предсказателя «нет»
+    int bestJ() {
         int bj = -1;
-        double bd = 0.02;   // минимальный выигрыш (нат на наблюдение), иначе предсказателя «нет»
+        double bd = minD;
         for (int j = 0; j < NH; j++) {
             if (!(needMask >> j & 1) || neff[j] < 15.0f) continue;
             float ml = loss[0][bestF[j]];
@@ -483,6 +485,7 @@ struct Predictor {
             (void)ml;
             if (d > bd) { bd = d; bj = j; }
         }
+        lastD = bj >= 0 ? bd : 0;
         return bj;
     }
 
@@ -571,15 +574,17 @@ struct EngineParams {   // параметры выбора лидера (сте�
     int qwin = 256;     // окно (число последних укладок) для квантиля длин
     double qq = 0.25;   // квантиль
     int every = 8;      // оценивать лидера раз в столько укладок
-    double hystArena = 0.03;  // гистерезис при переключении НА политику с аренами
+    double hystArena = 0.01;  // гистерезис при переключении НА политику с аренами
     double hystAA = 0.03;     // ... если и текущая политика с аренами (переключение арена -> арена)
     int startCmds = 60;       // первые startCmds команд ведёт политика startName (хороша на крошечных «головоломках»), затем — политика 0
+    int persist = 1;          // лидерство должно сохраняться на стольких подряд оценках, чтобы переключиться
     double fast = 0.06;       // при выигрыше больше fast (доля оценки) переключаемся, не дожидаясь dwell
     int dwellFast = 40;       // ... но не чаще раза в dwellFast укладок
 };
 static EngineParams& engineParams() { static EngineParams ep; return ep; }
 static bool& dbgSwitch() { static bool b = false; return b; }
-static int g_famMask = -1, g_nhLimit = -1;   // стенд: ограничения предсказателя для замеров (в бою не используются)
+static int g_famMask = -1, g_nhLimit = -1;
+static double g_minD = -1;   // стенд: ограничения предсказателя для замеров (в бою не используются)
 static int& dbgScore() { static int v = 0; return v; }   // стенд: печатать оценки политик раз в dbgScore укладок
 static bool& leanEnabled() { static bool b = true; return b; }   // стенд выключает (CPU-время процесса там общее для всех тестов)
 #ifdef SIM
@@ -603,6 +608,7 @@ struct Engine {
     int placedAll = 0;
     int cmds = 0;
     int startIdx = 0;
+    int candPol = -1, candCnt = 0;   // претендент и число подряд оценок, на которых он лидирует
     bool lean = false;       // аварийный режим: теней и предсказателя нет, реальная траншея ведётся одной политикой
     double leanPerCmd = LEAN_PER_CMD;   // порог CPU на команду: 5 с / 200000 = 25 мкс, берём запас
 
@@ -616,6 +622,7 @@ struct Engine {
         for (int k = 0; k < NPOL; k++) if ((p < 0 || k == p) && POLS[k].js >= 0) { usePred = true; pred.needMask |= POLS[k].js == 99 ? ((1 << Predictor::NH) - 1) : (1 << POLS[k].js); }
         if (g_famMask >= 0) pred.famMask = g_famMask | 1;
         if (g_nhLimit > 0) pred.needMask &= (1 << g_nhLimit) - 1;
+        if (g_minD >= 0) pred.minD = g_minD;
     }
     int classOf(const Pol& p, const float* pr) const {
         if (p.js < 0) return 0;
@@ -695,7 +702,9 @@ struct Engine {
                 }
                 double lead = sCur > 0 ? (sCur - sBest) / sCur : 0;
                 double need = POLS[best].js >= 0 ? (POLS[cur].js >= 0 ? ep.hystAA : ep.hystArena) : ep.hyst;
-                if (best != cur && lead > need && (sinceSwitch >= ep.dwell || lead > ep.fast) && sCur - sBest > ep.absMargin) {
+                if (best != cur && lead > need) { if (candPol == best) candCnt++; else { candPol = best; candCnt = 1; } }
+                else { candPol = -1; candCnt = 0; }
+                if (best != cur && lead > need && candCnt >= ep.persist && (sinceSwitch >= ep.dwell || lead > ep.fast) && sCur - sBest > ep.absMargin) {
                     if (dbgSwitch()) {
                         fprintf(stderr, "t=%d switch %s -> %s  trench: real=%d", cmds, POLS[cur].name, POLS[best].name, real.trench);
                         for (int k = 0; k < NPOL; k++) fprintf(stderr, " %s=%d", POLS[k].name, sh[k].trench);
@@ -703,6 +712,7 @@ struct Engine {
                     }
                     cur = best;
                     sinceSwitch = 0;
+                    candPol = -1; candCnt = 0;
                 }
             }
             real.place(POLS[cur], L, classOf(POLS[cur], pr), N, D);
