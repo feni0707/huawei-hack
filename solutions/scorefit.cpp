@@ -96,6 +96,23 @@ struct Alloc {
         return 1;
     }
 
+    // ---- модель ожидаемых потерь дыры: W[r] — сколько метров дыры длины r останется пустыми,
+    // если её заполнять случайными трубами из текущего распределения длин
+    double W[NB] = {0};
+    int wAge = 1 << 30;
+    void rebuildW() {
+        double pr[MAXL + 1], tot = 0;
+        for (int l = 1; l <= MAXL; l++) { pr[l] = cnt[l] > P[1] * cntTot ? cnt[l] : 0; tot += pr[l]; }
+        W[0] = 0;
+        for (int r = 1; r < NB; r++) {
+            double s = 0, w = 0;
+            for (int l = 1; l <= MAXL && l <= r; l++) if (pr[l] > 0) { s += pr[l]; w += pr[l] * W[r - l]; }
+            W[r] = s > 0 ? w / s : r;
+        }
+        wAge = 0;
+    }
+    double Wf(int r) const { return r < NB ? W[r] : 0; }
+
     // стоимость остатка r после укладки (r > 0)
     double fragCost(int r, int m) const {
         if (r < m) return r * P[2];        // мёртвый остаток
@@ -107,6 +124,7 @@ struct Alloc {
     // 1 — поток B (к правой границе роста F, растёт влево)
     std::vector<signed char> stream;
     int F = 0;                        // правая граница роста; F == T — обычный режим
+    double bVol = 0;                  // затухающий объём укладок потока B (для размера участка)
     std::vector<unsigned char> feat;  // биты признаков при рождении: bit0 — чётность индекса в серии равных длин, bit1 — чётность PID
     int runIdx = 0, lastL = 0;
     static const int NF = 2;
@@ -130,6 +148,9 @@ struct Alloc {
         double aGE = lo > 0 ? bitSum(lo) : 0;
         return dGE + aGE > 0 ? dGE / (dGE + aGE) : 0.5;
     }
+    double birthL[MAXL + 1] = {0}, deathL[MAXL + 1] = {0};
+    double pdieLen(int p) const { if (p <= 0) return 0; int l = len[p]; return (deathL[l] + 0.5) / (birthL[l] + 1); }
+    double hz2(int p) const { return P[18] == 1 ? pdieLen(p) : P[18] == 2 ? std::max(pdieLen(p), hazard(p)) : P[18] == 3 ? pdieLen(p) * hazard(p) : hazard(p); }
     const int* oracleDeath = nullptr;   // только SIM-эксперименты: время смерти по PID (команда), -1 — не умрёт
     int curCmd = 0;
 
@@ -177,7 +198,7 @@ struct Alloc {
             if (rc == st && lc != st) return gs + r;
             return st == 1 ? gs + r : gs;
         }
-        if (P[8] == 4) { if (hazard(lp) > hazard(rp)) return gs + r; return gs; }
+        if (P[8] == 4) { if (hz2(lp) > hz2(rp)) return gs + r; return gs; }
         if (P[8] == 1) { if (lp > rp) return gs + r; }
         else if (P[8] == 3) return gs + r;
         return gs;
@@ -191,6 +212,7 @@ struct Alloc {
         feat.push_back((unsigned char)((runIdx & 1) | ((pid & 1) << 1)));
         int st = chooseStream(pid, L);
         stream.push_back((signed char)st);
+        bVol = bVol * P[27] + (st == 1 ? L : 0);
 #ifdef SIM
         if (getenv("SFDBG") && pid % atoi(getenv("SFDBG")) == 0)
             fprintf(stderr, "pid=%d L=%d feat=%d st=%d k0=%.3f k1=%.3f tot=%.1f,%.1f F=%d T=%lld\n", pid, L, feat[pid], st, kappa(0), kappa(1), coTot[0], coTot[1], F, T);
@@ -201,6 +223,7 @@ struct Alloc {
         }
         if (F > T) F = (int)T;
         int ts = tailStart();
+        if (P[14] == 5 && ++wAge >= 64) rebuildW();
         double bestC = 1e18; int bgs = -1, bs = 0;
         int M = P[4] > 0 ? (int)P[4] : 1;  // сколько промежутков каждой длины смотреть
         auto eval = [&](int gs, int s) {
@@ -211,10 +234,17 @@ struct Alloc {
                 cst = -s;                                   // worst fit
             } else if (P[14] == 3) {
                 cst = s == L ? -1e9 : -s;                   // точное, иначе worst
+            } else if (P[14] == 5) {
+                // изменение ожидаемых потерь + разрыв ничьих по best fit
+                cst = Wf(s - L) - Wf(s) + 1e-3 * (s - L);
             } else if (P[14] == 4) {
                 cst = -(double)gs;                          // last fit
             } else {
                 cst = s == L ? -P[5] : fragCost(s - L, m) + P[6] * (s - L);
+                if (P[17] != 0 && s == L) {
+                    // точное попадание «замуровывает» дыру у соседа, который скоро умрёт (дыра бы выросла)
+                    cst += P[17] * std::max(hz2(pidEndAt[gs]), hz2(pidStartAt[gs + s]));
+                }
                 if (P[16] != 0 && s > L && s - L < m) {
                     // мёртвый остаток оживёт, только если умрёт сосед: штраф ~ r * P(оба соседа выживут)
                     double hl = hazard(pidEndAt[gs]), hr = hazard(pidStartAt[gs + s]);
@@ -240,8 +270,15 @@ struct Alloc {
         ll N = 0; int D;
         bool useGap = bgs >= 0 && bestC < P[7] + 1e17 * (P[7] == 0);
         if (st == 1 && P[12] == 2) useGap = false;
+        if (useGap && P[14] == 5 && bestC > P[19]) useGap = false;   // дыра не стоит того — в хвост
         // P15: если лучший промежуток оставляет мёртвый остаток >= P15 — лучше в хвост
-        if (useGap && P[15] > 0) { int r = bs - L; if (r > 0 && r < m && r >= P[15]) useGap = false; }
+        if (useGap && P[15] > 0) {
+            int r = bs - L;
+            if (r > 0 && r < m) {
+                double keep = P[25] ? 1 - std::max(hz2(pidEndAt[bgs]), hz2(pidStartAt[bgs + bs])) : 1;
+                if (r * keep >= P[15]) useGap = false;
+            }
+        }
         if (useGap) {
             D = chooseSide(bgs, bs, L, st);
             takeFrom(bgs, D, L);
@@ -249,6 +286,7 @@ struct Alloc {
             int fgs = (F > 0 && gapStartAtEnd[F] >= 0) ? gapStartAtEnd[F] : F;
             int fl = F - fgs;
             int chunk = (int)P[20];
+            if (P[26] > 0) chunk = std::min(chunk, std::max(L, (int)(P[26] * bVol)));
             if (fl >= L) {
                 D = st == 1 ? F - L : fgs;
                 takeFrom(fgs, D, L);
@@ -276,7 +314,7 @@ struct Alloc {
             }
         }
         pidStartAt[D] = pid; pidEndAt[D + L] = pid;
-        pos.push_back(D); len.push_back(L); alive.push_back(1);
+        pos.push_back(D); len.push_back(L); alive.push_back(1); birthL[L] += 1;
         if ((int)aliveBit.size() <= pid) aliveBit.resize(std::max<size_t>(pid + 1, aliveBit.size() * 2 + 16), 0), rebuildBit();
         bitAdd(pid, 1);
         observe(L); nPlaced++;
@@ -291,7 +329,7 @@ struct Alloc {
     std::vector<char> alive;
     ll remove(int pid) {
         int d = pos[pid], l = len[pid];
-        alive[pid] = 0; bitAdd(pid, -1);
+        alive[pid] = 0; bitAdd(pid, -1); deathL[l] += 1;
         deathAge[ageBucket((int)pos.size() - 1 - pid)] += 1;
         pidStartAt[d] = 0; pidEndAt[d + l] = 0;
         int e = freeRange(d, l);
@@ -348,7 +386,7 @@ int main(int argc, char** argv) {
         { int p = 0; for (size_t i = 0; i < cmd.size(); i++) { if (cmd[i] > 0) { death.push_back(-1); p++; } else death[-cmd[i]] = (int)i; } }
         A.oracleDeath = death.data();
         std::vector<int> cells;  // pid или 0
-        std::vector<int> lastLen;
+        std::vector<int> lastLen, freedAt;
         ll occ = 0; bool ok = true;
         long long step = getenv("SFTRACE") ? atoll(getenv("SFTRACE")) : 0; long long ci = 0;
         for (int c : cmd) {
@@ -363,10 +401,15 @@ int main(int argc, char** argv) {
                 auto r = A.place(c);
                 ll T = (ll)cells.size() + 20 * r.first;
                 if (r.first < 0 || T != A.T || r.second < 0 || r.second + c > T) { ok = false; break; }
-                cells.resize(T, 0); lastLen.resize(T, 0);
+                cells.resize(T, 0); lastLen.resize(T, 0); freedAt.resize(T, -1);
                 for (int i = 0; i < c; i++) if (cells[r.second + i]) { ok = false; break; }
                 if (!ok) break;
                 int pid = (int)A.pos.size() - 1;
+                if (getenv("SFDIG") && r.first > 0) {
+                    ll holes, small; A.holeStats(holes, small);
+                    int mx = 0; for (int s = NB - 1; s > 0; s--) if (!A.bucket[s].empty()) { for (int g : A.bucket[s]) if (g != A.tailStart() && g + s != A.F) { mx = s; break; } if (mx) break; }
+                    printf("  dig t=%lld L=%d N=%lld T=%lld occ=%lld holes=%lld maxhole=%d\n", ci, c, r.first, A.T, occ, holes, mx);
+                }
                 for (int i = 0; i < c; i++) cells[r.second + i] = pid, lastLen[r.second + i] = c;
                 occ += c;
             } else {
@@ -374,7 +417,7 @@ int main(int argc, char** argv) {
                 ll d = A.remove(pid);
                 if (d < 0 || d >= (ll)cells.size() || cells[d] != pid) { ok = false; break; }
                 int l = A.len[pid];
-                for (int i = 0; i < l; i++) cells[d + i] = 0;
+                for (int i = 0; i < l; i++) cells[d + i] = 0, freedAt[d + i] = (int)ci;
                 occ -= l;
             }
         }
@@ -385,6 +428,25 @@ int main(int argc, char** argv) {
             printf("  free: never=%lld", never);
             long long sh = 0, lg = 0; for (int l = 1; l <= 40; l++) (l <= 7 ? sh : lg) += byLen[l];
             printf(" was_short=%lld was_long=%lld\n", sh, lg);
+        }
+        if (getenv("SFFREED") && ok) {
+            int from = atoi(getenv("SFFREED")); long long n = (long long)cmd.size();
+            long long b[8] = {0}; // освобождено: <100, <300, <1000, <3000, <10000, <30000, раньше, никогда
+            int lim[6] = {100, 300, 1000, 3000, 10000, 30000};
+            for (size_t i = from; i < cells.size(); i++) if (!cells[i]) {
+                if (freedAt[i] < 0) { b[7]++; continue; }
+                long long age = n - freedAt[i]; int k = 0; while (k < 6 && age >= lim[k]) k++; b[k]++;
+            }
+            printf("  freed-age from %d: <100:%lld <300:%lld <1k:%lld <3k:%lld <10k:%lld <30k:%lld older:%lld never:%lld\n", from, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+        }
+        if (getenv("SFMAP") && ok) {
+            // карта траншеи: длины труб (с возрастом) и дыры [h]
+            size_t i = 0; int np = (int)A.pos.size() - 1;
+            while (i < cells.size()) {
+                if (cells[i]) { int p = cells[i]; printf("%d", A.len[p]); if (getenv("SFMAPAGE")) printf("(%d)", np - p); printf(" "); i += A.len[p]; }
+                else { size_t j = i; while (j < cells.size() && !cells[j]) j++; printf("[%zu] ", j - i); i = j; }
+            }
+            printf("\n");
         }
         if (getenv("SFHOLES") && ok) {
             int from = atoi(getenv("SFHOLES"));
