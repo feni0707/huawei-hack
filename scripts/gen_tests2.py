@@ -197,6 +197,115 @@ def gen_sorted2(rng, n):
     return b.cmds
 
 
+def gen_sawtooth(rng, n):
+    """Пилообразная нагрузка: набор k труб, затем удаление доли (случайно / FIFO / LIFO)."""
+    b = Builder(n)
+    maxlen = rng.choice([8, 16, 40])
+    while b.room(10):
+        k = rng.randint(100, 1500)
+        pids = [b.place(rng.randint(1, maxlen)) for _ in range(min(k, n - len(b.cmds) - 5))]
+        frac = rng.uniform(0.4, 0.95)
+        mode = rng.choice(["rand", "fifo", "lifo"])
+        victims = rng.sample(pids, int(len(pids) * frac)) if mode == "rand" else (pids[:int(len(pids) * frac)] if mode == "fifo" else pids[::-1][:int(len(pids) * frac)])
+        for v in victims:
+            if not b.room():
+                break
+            if b.is_alive(v):
+                b.remove(v)
+    return b.cmds
+
+
+def gen_bimodal(rng, n):
+    """Два размера: мелкие 1..3 и крупные 30..40; срок жизни экспоненциальный, у крупных короче."""
+    b = Builder(n)
+    ms, ml = rng.uniform(200, 4000), rng.uniform(20, 400)
+    due = {}   # индекс команды -> список pid
+    t = 0
+    while b.room():
+        L = rng.randint(1, 3) if rng.random() < 0.7 else rng.randint(30, 40)
+        pid = b.place(L)
+        d = len(b.cmds) + int(rng.expovariate(1.0 / (ms if L <= 3 else ml))) + 1
+        due.setdefault(d, []).append(pid)
+        for idx in [i for i in list(due) if i <= len(b.cmds)]:
+            for q in due.pop(idx):
+                if b.is_alive(q) and b.room():
+                    b.remove(q)
+    return b.cmds
+
+
+def gen_fifo(rng, n):
+    """Очередь: окно из W живых труб, удаляется самая старая (длины случайные или циклические)."""
+    b = Builder(n)
+    W = rng.randint(50, 3000)
+    cyc = rng.random() < 0.5
+    pat = [rng.randint(1, 40) for _ in range(rng.randint(3, 12))]
+    q = []
+    i = 0
+    while b.room(2):
+        q.append(b.place(pat[i % len(pat)] if cyc else rng.randint(1, 40)))
+        i += 1
+        if len(q) > W:
+            b.remove(q.pop(0))
+    return b.cmds
+
+
+def gen_lifo(rng, n):
+    """Стек: волны роста и спада (удаляются самые свежие), длины случайные."""
+    b = Builder(n)
+    st = []
+    maxlen = rng.choice([10, 25, 40])
+    while b.room(2):
+        up = rng.randint(50, 800)
+        for _ in range(up):
+            if not b.room(2):
+                break
+            st.append(b.place(rng.randint(1, maxlen)))
+        down = int(len(st) * rng.uniform(0.3, 0.9))
+        for _ in range(down):
+            if not b.room() or not st:
+                break
+            b.remove(st.pop())
+    return b.cmds
+
+
+def gen_desc(rng, n):
+    """Серии по убыванию длин, после серии удаляется каждая вторая (зеркало sorted2)."""
+    lens = sorted(rng.sample(range(1, MAX_LEN + 1), rng.randint(6, 25)), reverse=True)
+    group = max(4, int(n / (1.5 * len(lens))))
+    b = Builder(n)
+    for L in lens:
+        if not b.room(group + group // 2):
+            break
+        pids = [b.place(L) for _ in range(group)]
+        for p in pids[::2]:
+            b.remove(p)
+    return b.cmds
+
+
+def gen_sorted_big(rng, n):
+    """sorted2 в крупном масштабе (n до 200000): большие серии (1500..6000 труб) — проверка масштабирования горизонта предсказателя."""
+    variant = rng.choice(["full", "pow2", "subset", "evens"])
+    if variant == "full":
+        lens = list(range(1, rng.choice([20, 30, 40]) + 1))
+    elif variant == "pow2":
+        lens = [1, 2, 4, 8, 16, 32]
+    elif variant == "evens":
+        lens = list(range(2, 41, 2))
+    else:
+        lens = sorted(rng.sample(range(1, MAX_LEN + 1), rng.randint(8, 20)))
+    step = rng.choice([2, 2, 2, 3])
+    off = rng.choice([0, 0, 1])
+    group = max(2 * step, int(n / (1.0 + 1.0 / step) / len(lens)))
+    b = Builder(n)
+    for L in lens:
+        if not b.room(group + group // step + 2):
+            break
+        pids = [b.place(L) for _ in range(group)]
+        for p in pids[off::step]:
+            b.remove(p)
+    return b.cmds
+
+
 def gen_tiny(rng, n):
     # n игнорируется: размер выбирается внутри (6..24 команд)
     size = rng.randint(6, 24)
@@ -215,6 +324,12 @@ CLASSES = {
     "twophase": (gen_twophase, [10000, 50000, 200000]),
     "invert": (gen_invert, [10000, 50000]),
     "sorted2": (gen_sorted2, [3000, 7500, 9000]),
+    "sawtooth": (gen_sawtooth, [20000, 60000]),
+    "bimodal": (gen_bimodal, [20000, 60000]),
+    "fifo": (gen_fifo, [20000, 60000]),
+    "lifo": (gen_lifo, [20000, 60000]),
+    "desc": (gen_desc, [5000, 9000]),
+    "sortedbig": (gen_sorted_big, [60000, 120000, 200000]),
     "tiny": (gen_tiny, [0]),
 }
 

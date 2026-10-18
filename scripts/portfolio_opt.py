@@ -11,7 +11,7 @@ import csv
 import collections
 import re
 
-CLASS_W = {"open": 40.0, "twophase": 10.0, "alternating": 8.0, "sorted2": 3.0, "invert": 2.0, "periodic": 2.0, "phases": 4.0, "tiny": 1.0}
+CLASS_W = {"open": 40.0, "twophase": 10.0, "alternating": 8.0, "sorted2": 3.0, "sortedbig": 6.0, "invert": 2.0, "periodic": 2.0, "phases": 4.0, "tiny": 1.0, "sawtooth": 2.0, "bimodal": 2.0, "fifo": 2.0, "lifo": 1.0, "desc": 2.0}
 
 
 def klass(label):

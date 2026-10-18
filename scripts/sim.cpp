@@ -80,6 +80,7 @@ static bool CHECK = false;
 static bool DUMP = false;
 static bool TRACE = false;
 static bool AGG = false, LINE = false;
+static bool ORACLE = false;
 static std::string CSV;
 static int THREADS = 0;
 static void dumpHoles(const Alloc& a) {
@@ -96,6 +97,14 @@ static Result run(const Test& t, F makeEngine) {
     Result r;
     auto t0 = std::chrono::steady_clock::now();
     auto eng = makeEngine();
+    std::vector<int> death;
+    if (ORACLE) {   // оракул времени смерти: предсказатель заменяется истинными данными
+        int np = 0;
+        for (int c : t.cmds) if (c > 0) np++;
+        death.assign(np + 2, 1 << 28);
+        for (size_t i = 0; i < t.cmds.size(); i++) if (t.cmds[i] < 0) death[-t.cmds[i]] = (int)i;
+        oracleDeath() = &death;
+    }
     Checker ck;
     size_t ci = 0;
     for (int c : t.cmds) {
@@ -114,6 +123,7 @@ static Result run(const Test& t, F makeEngine) {
             if (CHECK && !ck.remove(-c, D, r.err)) { r.ok = false; break; }
         }
     }
+    oracleDeath() = nullptr;
     auto t1 = std::chrono::steady_clock::now();
     r.ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     r.trench = eng->real.trench;
@@ -130,6 +140,7 @@ struct SetData {
 };
 
 int main(int argc, char** argv) {
+    leanEnabled() = false;   // CPU-время процесса в стенде общее для всех тестов — аварийный режим выключаем (--lean включает)
     std::string mode = "port";
     int polIdx = 0;
     bool verbose = false;
@@ -160,25 +171,39 @@ int main(int argc, char** argv) {
                 std::string f = kv.substr(0, q2);
                 double val = atof(kv.substr(q2 + 1).c_str());
                 if (f == "hyst") engineParams().hyst = val; else if (f == "absMargin") engineParams().absMargin = (int)val;
-                else if (f == "dwell") engineParams().dwell = (int)val; else if (f == "every") engineParams().every = (int)val; else if (f == "gamma") engineParams().gamma = val; else if (f == "qwin") engineParams().qwin = (int)val; else if (f == "qq") engineParams().qq = val; else fprintf(stderr, "unknown eng field %s\n", f.c_str());
+                else if (f == "dwell") engineParams().dwell = (int)val; else if (f == "every") engineParams().every = (int)val; else if (f == "gamma") engineParams().gamma = val; else if (f == "qwin") engineParams().qwin = (int)val; else if (f == "qq") engineParams().qq = val;
+                else if (f == "hystA") engineParams().hystArena = val; else if (f == "fast") engineParams().fast = val;
+                else if (f == "dwellFast") engineParams().dwellFast = (int)val; else if (f == "startCmds") engineParams().startCmds = (int)val;
+                else fprintf(stderr, "unknown eng field %s\n", f.c_str());
                 st = e + 1;
             }
         }
         else if (a == "--pool") {  // файл: name sel tieHigh right tailFirst js Cdiv Cmin Cmax Tsmall tuU Cmode th
             std::ifstream pf(argv[++i]);
-            std::string nm;
             static std::vector<std::string> names;
-            names.reserve(4096);
+            names.reserve(8192);
             POLS.clear();
-            int sel, tieHigh, right, tailFirst, js, Cdiv, Cmin, Cmax, Tsmall, tuU, Cmode, th;
-            while (pf >> nm >> sel >> tieHigh >> right >> tailFirst >> js >> Cdiv >> Cmin >> Cmax >> Tsmall >> tuU >> Cmode >> th) {
+            std::string line;
+            while (std::getline(pf, line)) {   // 12 чисел после имени + необязательный tau*100
+                std::istringstream is(line);
+                std::string nm;
+                int v[14] = {0};
+                if (!(is >> nm)) continue;
+                int cnt = 0;
+                while (cnt < 14 && (is >> v[cnt])) cnt++;
+                if (cnt < 12) continue;
                 names.push_back(nm);
-                Pol pp = {names.back().c_str(), (Sel)sel, (bool)tieHigh, (bool)right, (bool)tailFirst, js, Cdiv, Cmin, Cmax, Tsmall, tuU, Cmode, th};
+                Pol pp = {names.back().c_str(), (Sel)v[0], (bool)v[1], (bool)v[2], (bool)v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11]};
+                if (cnt >= 13) pp.tau = (float)v[12] / 100.0f;
                 POLS.push_back(pp);
             }
         }
         else if (a == "--csv") CSV = argv[++i];
         else if (a == "--dbgswitch") dbgSwitch() = true;
+        else if (a == "--oracle") ORACLE = true;
+        else if (a == "--lean") leanEnabled() = true;
+        else if (a == "--fam") g_famMask = (int)strtol(argv[++i], nullptr, 0);
+        else if (a == "--nh") g_nhLimit = atoi(argv[++i]);
         else if (a == "--pset") {  // --pset idx:field=val[,field=val]  (js, Cdiv, Cmin, Cmax, Tsmall, right, tieHigh, tailFirst, sel)
             std::string v = argv[++i];
             size_t c = v.find(':');
@@ -199,6 +224,9 @@ int main(int argc, char** argv) {
                 if (f == "js") pp.js = val; else if (f == "Cdiv") pp.Cdiv = val; else if (f == "Cmin") pp.Cmin = val;
                 else if (f == "Cmax") pp.Cmax = val; else if (f == "Tsmall") pp.Tsmall = val; else if (f == "tuU") pp.tuU = val; else if (f == "Cmode") pp.Cmode = val; else if (f == "th") pp.th = val; else if (f == "right") pp.right = val;
                 else if (f == "tieHigh") pp.tieHigh = val; else if (f == "tailFirst") pp.tailFirst = val; else if (f == "sel") pp.sel = (Sel)val;
+                else if (f == "tau") pp.tau = (float)val / 100.0f; else if (f == "sw0") pp.sw0 = (float)val / 100.0f;
+                else if (f == "swsmall") pp.swsmall = (float)val / 100.0f; else if (f == "swsize") pp.swsize = (float)val / 100.0f;
+                else if (f == "wkap") pp.wkap = (float)val / 100.0f;
                 else fprintf(stderr, "unknown field %s\n", f.c_str());
                 st = e + 1;
             }
