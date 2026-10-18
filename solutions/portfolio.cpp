@@ -566,6 +566,8 @@ constexpr int Predictor::KS[Predictor::NF];
 struct EngineParams {   // параметры выбора лидера (стенд может менять)
     double hyst = 0.005;// переключаться, только если лидер лучше текущей на hyst (доля оценки)
     int absMargin = 0;  // ... и минимум на столько клеток
+    int arenaMin = 800; // на арены можно переключаться, только если оценка текущей политики >= arenaMin клеток
+    double kAbs = 0;    // ... и минимум kAbs*sqrt(оценка) клеток (шум квантования значим на малых траншеях)
     int dwell = 500;    // минимум команд между переключениями
     double gamma = 0.5; // оценка = live + (1-gamma)*свободное + gamma*непригодное (дыры короче квантиля длин)
     int qwin = 256;     // окно (число последних укладок) для квантиля длин
@@ -699,9 +701,10 @@ struct Engine {
                 }
                 double lead = sCur > 0 ? (sCur - sBest) / sCur : 0;
                 double need = POLS[best].js >= 0 ? (POLS[cur].js >= 0 ? ep.hystAA : ep.hystArena) : ep.hyst;
+                if (best != cur && POLS[best].js >= 0 && POLS[cur].js < 0 && sCur < ep.arenaMin) lead = 0;   // на малых траншеях арены не пробуем
                 if (best != cur && lead > need) { if (candPol == best) candCnt++; else { candPol = best; candCnt = 1; } }
                 else { candPol = -1; candCnt = 0; }
-                if (best != cur && lead > need && candCnt >= ep.persist && (sinceSwitch >= ep.dwell || lead > ep.fast) && sCur - sBest > ep.absMargin) {
+                if (best != cur && lead > need && candCnt >= ep.persist && (sinceSwitch >= ep.dwell || lead > ep.fast) && sCur - sBest > ep.absMargin && sCur - sBest > ep.kAbs * std::sqrt(sCur)) {
                     if (dbgSwitch()) {
                         fprintf(stderr, "t=%d switch %s -> %s  trench: real=%d", cmds, POLS[cur].name, POLS[best].name, real.trench);
                         for (int k = 0; k < NPOL; k++) fprintf(stderr, " %s=%d", POLS[k].name, sh[k].trench);
