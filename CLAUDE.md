@@ -9,6 +9,7 @@
 | `docs/TASK.md` | **Всегда перед работой над решением.** Полное условие без потерь (перенос PDF: формулы, таблицы весов, иллюстрации в ASCII). |
 | `docs/MATERIALS.md` | Как устроен интерактор (точные проверки из исходника), формат тестов, как запускать, подводные камни `runner.py`. |
 | `docs/TESTS_ANALYSIS.md` | Статистика и характер 15 открытых тестов, верхние оценки KPI, baseline. |
+| `EXPERIMENTS.md` | Журнал экспериментов команды: что пробовали, цифры open/gen, выводы. Читать перед новой идеей. |
 | `docs/statement.pdf` | Оригинал условия (для людей). Картинка с примерами: `docs/img/examples-page2.png`. |
 | `materials/` | Официальный архив с NSUts (тесты, интерактор, runner). **Не редактировать.** |
 
@@ -35,7 +36,20 @@ scripts/run_tests.sh build/naive materials/tests/15.in  # один тест
 scripts/debug_run.sh build/naive materials/tests/8.in   # один тест с причиной WA от интерактора
 python3 scripts/analyze_tests.py materials/tests        # статистика тестов
 python3 scripts/kpi_upper_bound.py materials/tests      # верхние оценки KPI
+
+python3 scripts/gen_tests.py --clean                    # сгенерировать тесты всех классов в build/gen/<class>/ (seed 1)
+python3 scripts/gen_tests.py --class random_bursts --size 200000 --count 3 --seed 2   # один класс, свой размер/seed
+python3 scripts/bench.py build/naive solutions/foo.cpp  # таблица: open Σw, avg KPI по gen-классам, WA/TL, CPU
+python3 scripts/bench.py --diff build/naive build/bin/foo   # потестовое сравнение двух решений
+python3 scripts/bench.py build/bin/foo -j 1             # точный CPU (параллельный прогон его завышает)
 ```
+
+- `gen_tests.py` — классы `sorted_groups` (как 5/9), `alternating` (8/13/12), `random_bursts` (11/15, до 200 000 команд),
+  `phases` (14), `periodic` (10); веса 1, детерминированно по `--seed`.
+- `bench.py` — наборы по умолчанию `materials/tests` + все `build/gen/*` (или `--tests DIR...`); `.cpp` сам собирает
+  в `build/bin/<имя>`; прогон через `build/interactor` без `runner.py`, параллельно (`-j`, по умолчанию ядра/2),
+  WA/TL = KPI 0 и подсвечиваются с причиной от интерактора; TL — CPU > 5 с или wall > `--timeout`.
+  Код возврата 1 при любом WA/TL. Сырые результаты — `build/bench/last.csv`.
 
 `scripts/build_interactor.sh` собирает `materials/interactor.cpp` в `build/interactor` (вызывается автоматически;
 готовый `materials/interactor` — Linux ELF, на macOS не работает).
@@ -43,11 +57,16 @@ python3 scripts/kpi_upper_bound.py materials/tests      # верхние оце�
 ## Структура и соглашения
 
 - `solutions/` — исходники решений. `solutions/naive.cpp` — эталон протокола I/O (Total 4.91), не стратегия.
+- **Одно решение = один файл `solutions/<имя>.cpp`; правит его только владелец.** Хотите развить чужую идею —
+  скопируйте в свой файл под новым именем.
 - `scripts/` — инструменты прогона и анализа. `build/` — артефакты сборки и прогонов (в `.gitignore`).
 - Язык решений — C++17 (скорость важна для тай-брейка). Решение — один файл без внешних зависимостей
   (так проще посылать на NSUts).
 - Решение обязано само хранить позицию каждой трубы по PID и состояние траншеи.
-- Любое изменение стратегии проверять `scripts/run_tests.sh` и сравнивать Total с предыдущим; WA на любом тесте недопустим.
+- Любое изменение стратегии проверять `scripts/bench.py` (open + gen-наборы) и сравнивать с предыдущим (`--diff`);
+  WA/TL на любом тесте недопустим.
+- **После каждого эксперимента дописывай строку в `EXPERIMENTS.md`** (дата, автор, решение/ветка, идея, open,
+  gen-метрики, WA/TL, CPU, вывод) — и удачные, и неудачные.
 - Не переобучаться на открытые тесты: закрытые весят 84 из 116.1. Проверять устойчивость на сгенерированных
   тестах похожих классов (см. `docs/TESTS_ANALYSIS.md`).
 - Следить за CPU на `materials/tests/15.in` (200 000 команд) — запас по времени должен быть большим.
@@ -56,4 +75,5 @@ python3 scripts/kpi_upper_bound.py materials/tests      # верхние оце�
 
 - [x] Условие и материалы разобраны, инфраструктура прогона работает (macOS/Linux).
 - [x] Baseline: Total 4.91 / 32.1. Тривиальная верхняя оценка ≈ 30.76 / 32.1.
+- [x] Командная инфраструктура: генератор тестов `scripts/gen_tests.py`, бенчмарк `scripts/bench.py`, журнал `EXPERIMENTS.md`.
 - [ ] Основное решение.
