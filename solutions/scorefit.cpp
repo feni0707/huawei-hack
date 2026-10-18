@@ -23,8 +23,8 @@ typedef long long ll;
 // P21 мин. число пар удалений для включения, P22 порог каппы, P23 затухание рождений, P24 затухание пар
 // P15 мёртвый остаток >= P15 — в хвост (0 выкл), P16 штраф мёртвого остатка с учётом риска смерти соседей
 //      0  1      2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19
-static double P[32] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                       400, 20, 0.6, 0.999, 0.998};
+static double P[32] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 3, 4, 0,
+                       400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98};
 
 // ---------------------------------------------------------------- аллокатор
 // Свободные промежутки: граничные метки (склейка за O(1)) + корзины по точной длине (< NB) + set для больших.
@@ -152,7 +152,15 @@ struct Alloc {
     }
     double birthL[MAXL + 1] = {0}, deathL[MAXL + 1] = {0};
     double pdieLen(int p) const { if (p <= 0) return 0; int l = len[p]; return (deathL[l] + 0.5) / (birthL[l] + 1); }
-    double hz2(int p) const { return P[18] == 1 ? pdieLen(p) : P[18] == 2 ? std::max(pdieLen(p), hazard(p)) : P[18] == 3 ? pdieLen(p) * hazard(p) : hazard(p); }
+    // интенсивность смертей по длине: доля недавних удалений длины l / доля живых длины l
+    double recDel[MAXL + 1] = {0}, recDelTot = 0; int aliveCntL[MAXL + 1] = {0}, aliveTot = 0;
+    double hzRate(int p) const {
+        if (p <= 0 || recDelTot < 1) return 0;
+        int l = len[p];
+        double rel = (recDel[l] / recDelTot) / ((double)std::max(1, aliveCntL[l]) / std::max(1, aliveTot));
+        return std::min(1.0, rel / P[30]);
+    }
+    double hz2(int p) const { return P[18] == 4 ? hzRate(p) : P[18] == 1 ? pdieLen(p) : P[18] == 2 ? std::max(pdieLen(p), hazard(p)) : P[18] == 3 ? pdieLen(p) * hazard(p) : hazard(p); }
     const int* oracleDeath = nullptr;   // только SIM-эксперименты: время смерти по PID (команда), -1 — не умрёт
     int curCmd = 0;
 
@@ -239,6 +247,9 @@ struct Alloc {
         if (F > T) F = (int)T;
         int ts = tailStart();
         if (P[14] == 5 && ++wAge >= 64) rebuildW();
+        double selfHz = 0;
+        if (P[18] == 4 && recDelTot >= 1)
+            selfHz = std::min(1.0, (recDel[L] / recDelTot) / ((double)std::max(1, aliveCntL[L]) / std::max(1, aliveTot)) / P[30]);
         double bestC = 1e18; int bgs = -1, bs = 0;
         int M = P[4] > 0 ? (int)P[4] : 1;  // сколько промежутков каждой длины смотреть
         auto eval = [&](int gs, int s) {
@@ -259,6 +270,7 @@ struct Alloc {
                 if (P[17] != 0 && s == L) {
                     // точное попадание «замуровывает» дыру у соседа, который скоро умрёт (дыра бы выросла)
                     double h = std::max(hz2(pidEndAt[gs]), hz2(pidStartAt[gs + s]));
+                    if (P[18] == 4) h -= selfHz;   // вредно, только если новая труба живёт дольше соседа
                     if (h >= P[28]) cst += P[17] * h;
                 }
                 if (P[16] != 0 && s > L && s - L < m) {
@@ -335,7 +347,7 @@ struct Alloc {
             fprintf(stderr, "place pid=%d L=%d st=%d D=%d N=%lld gap=%s bs=%d F=%d T=%lld\n", pid, L, st, D, N, useGap ? "hole" : "front", bs, F, T);
 #endif
         pidStartAt[D] = pid; pidEndAt[D + L] = pid;
-        pos.push_back(D); len.push_back(L); alive.push_back(1); birthL[L] += 1;
+        pos.push_back(D); len.push_back(L); alive.push_back(1); birthL[L] += 1; aliveCntL[L]++; aliveTot++;
         if ((int)aliveBit.size() <= pid) aliveBit.resize(std::max<size_t>(pid + 1, aliveBit.size() * 2 + 16), 0), rebuildBit();
         bitAdd(pid, 1);
         observe(L); nPlaced++;
@@ -351,6 +363,8 @@ struct Alloc {
     ll remove(int pid) {
         int d = pos[pid], l = len[pid];
         alive[pid] = 0; bitAdd(pid, -1); deathL[l] += 1;
+        for (int k = 1; k <= MAXL; k++) recDel[k] *= P[31];
+        recDelTot = recDelTot * P[31] + 1; recDel[l] += 1; aliveCntL[l]--; aliveTot--;
         deathAge[ageBucket((int)pos.size() - 1 - pid)] += 1;
         pidStartAt[d] = 0; pidEndAt[d + l] = 0;
         int e = freeRange(d, l);
