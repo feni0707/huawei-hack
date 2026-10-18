@@ -8,7 +8,9 @@
 #define SIM
 #include "../solutions/portfolio.cpp"
 
+#include <atomic>
 #include <chrono>
+#include <thread>
 #include <memory>
 #include <filesystem>
 #include <fstream>
@@ -77,6 +79,9 @@ struct Checker {
 static bool CHECK = false;
 static bool DUMP = false;
 static bool TRACE = false;
+static bool AGG = false, LINE = false;
+static std::string CSV;
+static int THREADS = 0;
 static void dumpHoles(const Alloc& a) {
     long long cnt[41] = {0}, cells[41] = {0};
     for (auto& kv : a.byAddr) { int h = std::min(kv.second.len, 40); cnt[h]++; cells[h] += kv.second.len; }
@@ -119,7 +124,7 @@ static Result run(const Test& t, F makeEngine) {
 }
 
 struct SetData {
-    std::string name;
+    std::string name, label;
     std::vector<Test> tests;
     bool weighted = false;
 };
@@ -131,12 +136,73 @@ int main(int argc, char** argv) {
     std::vector<std::string> paths;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
-        if (a == "--pol") { std::string v = argv[++i]; if (v == "all") mode = "all"; else { mode = "pol"; polIdx = atoi(v.c_str()); } }
+        if (a == "--pol") { std::string v = argv[++i]; if (v == "all") mode = "all"; else {
+            mode = "pol"; polIdx = -1;
+            for (int kk = 0; kk < NPOL; kk++) if (v == POLS[kk].name) polIdx = kk;
+            if (polIdx < 0) polIdx = atoi(v.c_str());
+        } }
         else if (a == "--port") mode = "port";
         else if (a == "--check") CHECK = true;
         else if (a == "-v") verbose = true;
         else if (a == "--dump") DUMP = true;
         else if (a == "--trace") TRACE = true;
+        else if (a == "--agg") AGG = true;
+        else if (a == "--line") { AGG = true; LINE = true; }
+        else if (a == "-t") THREADS = atoi(argv[++i]);
+        else if (a == "--eng") {  // --eng hyst=0.02,absMargin=20,dwell=500
+            std::string v = argv[++i];
+            size_t st = 0;
+            while (st < v.size()) {
+                size_t e = v.find(',', st);
+                if (e == std::string::npos) e = v.size();
+                std::string kv = v.substr(st, e - st);
+                size_t q2 = kv.find('=');
+                std::string f = kv.substr(0, q2);
+                double val = atof(kv.substr(q2 + 1).c_str());
+                if (f == "hyst") engineParams().hyst = val; else if (f == "absMargin") engineParams().absMargin = (int)val;
+                else if (f == "dwell") engineParams().dwell = (int)val; else if (f == "beta") engineParams().beta = val; else if (f == "gamma") engineParams().gamma = val; else if (f == "qwin") engineParams().qwin = (int)val; else if (f == "qq") engineParams().qq = val; else if (f == "wfrac") engineParams().wfrac = val; else if (f == "wmin") engineParams().wmin = (int)val; else fprintf(stderr, "unknown eng field %s\n", f.c_str());
+                st = e + 1;
+            }
+        }
+        else if (a == "--pool") {  // файл: name sel tieHigh right tailFirst js Cdiv Cmin Cmax Tsmall tuU Cmode th
+            std::ifstream pf(argv[++i]);
+            std::string nm;
+            static std::vector<std::string> names;
+            names.reserve(4096);
+            POLS.clear();
+            int sel, tieHigh, right, tailFirst, js, Cdiv, Cmin, Cmax, Tsmall, tuU, Cmode, th;
+            while (pf >> nm >> sel >> tieHigh >> right >> tailFirst >> js >> Cdiv >> Cmin >> Cmax >> Tsmall >> tuU >> Cmode >> th) {
+                names.push_back(nm);
+                Pol pp = {names.back().c_str(), (Sel)sel, (bool)tieHigh, (bool)right, (bool)tailFirst, js, Cdiv, Cmin, Cmax, Tsmall, tuU, Cmode, th};
+                POLS.push_back(pp);
+            }
+        }
+        else if (a == "--csv") CSV = argv[++i];
+        else if (a == "--dbgswitch") dbgSwitch() = true;
+        else if (a == "--pset") {  // --pset idx:field=val[,field=val]  (js, Cdiv, Cmin, Cmax, Tsmall, right, tieHigh, tailFirst, sel)
+            std::string v = argv[++i];
+            size_t c = v.find(':');
+            std::string nm = v.substr(0, c);
+            int idx = -1;
+            for (int kk = 0; kk < NPOL; kk++) if (nm == POLS[kk].name) idx = kk;
+            if (idx < 0) idx = atoi(nm.c_str());
+            std::string rest = v.substr(c + 1);
+            size_t st = 0;
+            while (st < rest.size()) {
+                size_t e = rest.find(',', st);
+                if (e == std::string::npos) e = rest.size();
+                std::string kv = rest.substr(st, e - st);
+                size_t q2 = kv.find('=');
+                std::string f = kv.substr(0, q2);
+                int val = atoi(kv.substr(q2 + 1).c_str());
+                Pol& pp = POLS[idx];
+                if (f == "js") pp.js = val; else if (f == "Cdiv") pp.Cdiv = val; else if (f == "Cmin") pp.Cmin = val;
+                else if (f == "Cmax") pp.Cmax = val; else if (f == "Tsmall") pp.Tsmall = val; else if (f == "tuU") pp.tuU = val; else if (f == "Cmode") pp.Cmode = val; else if (f == "th") pp.th = val; else if (f == "right") pp.right = val;
+                else if (f == "tieHigh") pp.tieHigh = val; else if (f == "tailFirst") pp.tailFirst = val; else if (f == "sel") pp.sel = (Sel)val;
+                else fprintf(stderr, "unknown field %s\n", f.c_str());
+                st = e + 1;
+            }
+        }
         else if (a == "--dump") DUMP = true;
         else paths.push_back(a);
     }
@@ -147,6 +213,7 @@ int main(int argc, char** argv) {
         if (fs::is_directory(p)) {
             sd.name = fs::path(p).filename().string();
             if (sd.name.empty()) sd.name = fs::path(p).parent_path().filename().string();
+            sd.label = fs::path(p).parent_path().filename().string() + "/" + sd.name;
             std::vector<fs::path> files;
             for (auto& e : fs::directory_iterator(p)) if (e.path().extension() == ".in") files.push_back(e.path());
             std::sort(files.begin(), files.end(), [](const fs::path& a, const fs::path& b) {
@@ -171,43 +238,103 @@ int main(int argc, char** argv) {
         return sd.weighted ? s : s / std::max(1.0, sw);
     };
 
-    if (mode == "all") {
-        printf("%-16s", "set");
-        for (int k = 0; k < NPOL; k++) printf(" %8s", POLS[k].name);
-        printf(" %8s %8s\n", "oracle", "UB");
-        std::vector<double> colTot(NPOL + 2, 0);
+    if (AGG) {
+        std::vector<SetData> merged;
         for (auto& sd : sets) {
-            std::vector<std::vector<double>> K(NPOL, std::vector<double>(sd.tests.size()));
-            std::vector<double> orc(sd.tests.size(), 0), ub(sd.tests.size());
-            for (int k = 0; k < NPOL; k++)
-                for (size_t i = 0; i < sd.tests.size(); i++) {
-                    Result r = run(sd.tests[i], [&] { return std::unique_ptr<Engine>(new Engine(k)); });
-                    K[k][i] = r.kpi;
-                    orc[i] = std::max(orc[i], r.kpi);
-                    if (!r.ok) fprintf(stderr, "INVALID %s pol %s test %s: %s\n", sd.name.c_str(), POLS[k].name, sd.tests[i].name.c_str(), r.err.c_str());
-                }
-            for (size_t i = 0; i < sd.tests.size(); i++) ub[i] = sd.tests[i].ub;
-            printf("%-16s", sd.name.c_str());
-            for (int k = 0; k < NPOL; k++) printf(" %8.4f", agg(sd, K[k]));
-            printf(" %8.4f %8.4f\n", agg(sd, orc), agg(sd, ub));
+            bool found = false;
+            for (auto& m : merged) if (m.name == sd.name) { for (auto& t : sd.tests) m.tests.push_back(t); found = true; break; }
+            if (!found) merged.push_back(sd);
         }
+        sets = std::move(merged);
+    }
+    if (mode == "all") {
+        // матрица: каждая чистая политика на каждом тесте (параллельно), oracle = лучшая на каждом тесте, wins = сколько раз политика лучшая
+        int NP = NPOL;
+        struct J { size_t set, idx; int k; double kpi; };
+        std::vector<J> jobs;
+        for (size_t si = 0; si < sets.size(); si++) for (size_t i = 0; i < sets[si].tests.size(); i++) for (int k = 0; k < NP; k++) jobs.push_back({si, i, k, 0});
+        std::atomic<size_t> next(0);
+        int nth = (int)std::max(1u, std::thread::hardware_concurrency());
+        std::vector<std::thread> pool;
+        for (int ti = 0; ti < nth; ti++) pool.emplace_back([&] {
+            for (;;) {
+                size_t j = next++;
+                if (j >= jobs.size()) break;
+                Result r = run(sets[jobs[j].set].tests[jobs[j].idx], [&] { return std::unique_ptr<Engine>(new Engine(jobs[j].k)); });
+                jobs[j].kpi = r.kpi;
+                if (!r.ok) fprintf(stderr, "INVALID pol %d%s", jobs[j].k, "\n");
+            }
+        });
+        for (auto& th : pool) th.join();
+        if (!CSV.empty()) {
+            FILE* cf = fopen(CSV.c_str(), "w");
+            fprintf(cf, "set,test,w,pol,kpi%s", "\n");
+            for (auto& jb : jobs) fprintf(cf, "%s,%s,%g,%s,%.6f%s", sets[jb.set].label.c_str(), sets[jb.set].tests[jb.idx].name.c_str(), sets[jb.set].tests[jb.idx].w, POLS[jb.k].name, jb.kpi, "\n");
+            fclose(cf);
+            return 0;
+        }
+        printf("%-16s", "set");
+        for (int k = 0; k < NP; k++) printf(" %8s", POLS[k].name);
+        printf(" %8s %8s\n", "oracle", "UB");
+        std::vector<long long> wins(NP, 0);
+        long long ntests = 0;
+        for (size_t si = 0; si < sets.size(); si++) {
+            size_t nt = sets[si].tests.size();
+            std::vector<std::vector<double>> K(NP, std::vector<double>(nt, 0));
+            std::vector<double> orc(nt, 0), ub(nt);
+            for (auto& jb : jobs) if (jb.set == si) { K[jb.k][jb.idx] = jb.kpi; orc[jb.idx] = std::max(orc[jb.idx], jb.kpi); }
+            for (size_t i = 0; i < nt; i++) {
+                ub[i] = sets[si].tests[i].ub;
+                ntests++;
+                for (int k = 0; k < NP; k++) if (K[k][i] >= orc[i] - 1e-9) wins[k]++;
+            }
+            printf("%-16s", sets[si].name.c_str());
+            for (int k = 0; k < NP; k++) printf(" %8.4f", agg(sets[si], K[k]));
+            printf(" %8.4f %8.4f\n", agg(sets[si], orc), agg(sets[si], ub));
+        }
+        printf("%-16s", "wins/tests");
+        for (int k = 0; k < NP; k++) printf(" %8lld", wins[k]);
+        printf("  of %lld\n", ntests);
         return 0;
     }
 
-    double grand = 0;
-    for (auto& sd : sets) {
-        std::vector<double> k(sd.tests.size()), ub(sd.tests.size());
-        double maxms = 0;
-        for (size_t i = 0; i < sd.tests.size(); i++) {
-            Result r = mode == "pol" ? run(sd.tests[i], [&] { return std::unique_ptr<Engine>(new Engine(polIdx)); })
-                                     : run(sd.tests[i], [&] { return std::unique_ptr<Engine>(new Engine(-1)); });
-            if (!r.ok) fprintf(stderr, "INVALID %s test %s: %s\n", sd.name.c_str(), sd.tests[i].name.c_str(), r.err.c_str());
-            k[i] = r.kpi; ub[i] = sd.tests[i].ub;
-            maxms = std::max(maxms, r.ms);
-            if (verbose) printf("  %-16s %-8s w=%-4g kpi=%.4f ub=%.4f trench=%lld live=%lld  %.1fms\n", sd.name.c_str(),
-                                sd.tests[i].name.c_str(), sd.tests[i].w, r.kpi, sd.tests[i].ub, r.trench, r.live, r.ms);
+    // параллельный прогон всех тестов
+    struct Job { size_t set, idx; Result r; };
+    std::vector<Job> jobs;
+    for (size_t si = 0; si < sets.size(); si++) for (size_t i = 0; i < sets[si].tests.size(); i++) jobs.push_back({si, i, Result()});
+    std::atomic<size_t> next(0);
+    int nth = (int)std::max(1u, std::thread::hardware_concurrency());
+    if (THREADS > 0) nth = THREADS;
+    std::vector<std::thread> pool;
+    for (int ti = 0; ti < nth; ti++) pool.emplace_back([&] {
+        for (;;) {
+            size_t j = next++;
+            if (j >= jobs.size()) break;
+            const Test& t = sets[jobs[j].set].tests[jobs[j].idx];
+            jobs[j].r = mode == "pol" ? run(t, [&] { return std::unique_ptr<Engine>(new Engine(polIdx)); })
+                                      : run(t, [&] { return std::unique_ptr<Engine>(new Engine(-1)); });
         }
-        printf("%-16s %s=%.4f  UB=%.4f  maxms=%.0f\n", sd.name.c_str(), sd.weighted ? "sum" : "avg", agg(sd, k), agg(sd, ub), maxms);
+    });
+    for (auto& th : pool) th.join();
+    std::vector<std::vector<double>> K(sets.size());
+    std::vector<double> maxms(sets.size(), 0);
+    for (size_t si = 0; si < sets.size(); si++) K[si].assign(sets[si].tests.size(), 0);
+    for (auto& jb : jobs) {
+        const Test& t = sets[jb.set].tests[jb.idx];
+        if (!jb.r.ok) fprintf(stderr, "INVALID %s test %s: %s%s", sets[jb.set].name.c_str(), t.name.c_str(), jb.r.err.c_str(), "\n");
+        K[jb.set][jb.idx] = jb.r.kpi;
+        maxms[jb.set] = std::max(maxms[jb.set], jb.r.ms);
+        if (verbose) printf("  %-16s %-8s w=%-4g kpi=%.4f ub=%.4f trench=%lld live=%lld  %.1fms\n", sets[jb.set].name.c_str(), t.name.c_str(), t.w, jb.r.kpi, t.ub, jb.r.trench, jb.r.live, jb.r.ms);
+    }
+    if (LINE) {
+        for (size_t si = 0; si < sets.size(); si++) printf("%s=%.4f ", sets[si].name.c_str(), agg(sets[si], K[si]));
+        printf("\n");
+        return 0;
+    }
+    for (size_t si = 0; si < sets.size(); si++) {
+        std::vector<double> ub(sets[si].tests.size());
+        for (size_t i = 0; i < ub.size(); i++) ub[i] = sets[si].tests[i].ub;
+        printf("%-16s %s=%.4f  UB=%.4f  maxms=%.0f\n", sets[si].name.c_str(), sets[si].weighted ? "sum" : "avg", agg(sets[si], K[si]), agg(sets[si], ub), maxms[si]);
     }
     return 0;
 }

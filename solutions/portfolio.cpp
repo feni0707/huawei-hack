@@ -39,7 +39,7 @@ static inline int clz64idx(uint64_t x) {  // индекс старшего би�
 
 // ---------------------------------------------------------------- политики
 
-enum Sel { BEST, FIRST, LAST, WORST, EXACTWORST };
+enum Sel { BEST, FIRST, LAST, WORST, EXACTWORST, TFIT, NEAR };
 
 struct Pol {
     const char* name;
@@ -50,23 +50,27 @@ struct Pol {
     int js;           // горизонт предсказателя для класса T (скоротечные); -1 — без арен, все трубы класса P
     int Cdiv, Cmin, Cmax;  // размер чанка арены: clamp(trench / Cdiv, Cmin, Cmax)
     int Tsmall;       // P-трубы могут занимать T-дыры размером <= Tsmall
+    int tuU = 0;      // 1: T-трубы тоже могут занимать U-дыры (best fit по обеим)
+    int Cmode = 0;    // 0: чанк = Cdiv * (средняя длина T-труб); 1: чанк = liveT / Cdiv
+    int th = 0;       // порог остатка для TFIT
 };
 
-static const Pol POLS[] = {
-    {"bf-L", BEST, false, false, false, -1, 0, 0, 0, 0},
-    {"bf-R", BEST, false, true, false, -1, 0, 0, 0, 0},
-    {"bf-hiR", BEST, true, true, false, -1, 0, 0, 0, 0},
-    {"ff-L", FIRST, false, false, false, -1, 0, 0, 0, 0},
-    {"lf-L", LAST, false, false, false, -1, 0, 0, 0, 0},
-    {"wf-L", WORST, false, false, false, -1, 0, 0, 0, 0},
-    {"xw-L", EXACTWORST, false, false, false, -1, 0, 0, 0, 0},
-    {"a2", BEST, false, false, false, 2, 100, 40, 400, 40},
-    {"a3", BEST, false, false, false, 3, 100, 40, 400, 40},
-    {"a4", BEST, false, false, false, 4, 100, 40, 400, 40},
-    {"a5", BEST, false, false, false, 5, 100, 40, 400, 40},
-    {"a4x", EXACTWORST, false, false, false, 4, 100, 40, 400, 40},
+static const Pol POLS_INIT[] = {
+    //  имя        sel         tieHi  right  tailF  js  Cdiv Cmin Cmax Tsm tuU Cmode th
+    {"xw-R",      EXACTWORST, false, true,  false, -1,  0,   0,   0,   0,  0,  0,    0},
+    {"a4",        BEST,       false, false, false,  4,  6, 100, 4000,  0,  1,  0,    0},
+    {"ff-L",      FIRST,      false, false, false, -1,  0,   0,   0,   0,  0,  0,    0},
+    {"a3",        BEST,       false, false, false,  3,  6,  40, 4000,  0,  1,  0,    0},
+    {"bf-L",      BEST,       false, false, false, -1,  0,   0,   0,   0,  0,  0,    0},
 };
-static const int NPOL = sizeof(POLS) / sizeof(POLS[0]);
+static const int NPOL0 = sizeof(POLS_INIT) / sizeof(POLS_INIT[0]);
+// Таблица политик изменяема, чтобы стенд мог перебирать параметры (в бою не меняется).
+static std::vector<Pol>& polTable() {
+    static std::vector<Pol> v(POLS_INIT, POLS_INIT + NPOL0);
+    return v;
+}
+#define POLS (polTable())
+#define NPOL ((int)polTable().size())
 
 // ---------------------------------------------------------------- множество свободных дыр одного тега
 
@@ -75,18 +79,26 @@ struct HoleSet {
     std::set<std::pair<int, int>> big;    // дыры длины >= 40: (длина, адрес)
     std::set<int> bigAddr;                // они же по адресу
     uint64_t mask = 0;                    // бит s (1..39) — есть дыра длины s; бит 40 — есть большая
+    int cnt[40] = {0};                    // число дыр длины s (1..39)
+    long long bigSum = 0;                 // суммарная длина больших дыр
 
     void add(int a, int h) {
-        if (h < 40) { sz[h].insert(a); mask |= 1ull << h; }
-        else { big.insert({h, a}); bigAddr.insert(a); mask |= 1ull << 40; }
+        if (h < 40) { sz[h].insert(a); mask |= 1ull << h; cnt[h]++; }
+        else { big.insert({h, a}); bigAddr.insert(a); mask |= 1ull << 40; bigSum += h; }
     }
     void del(int a, int h) {
-        if (h < 40) { sz[h].erase(a); if (sz[h].empty()) mask &= ~(1ull << h); }
-        else { big.erase({h, a}); bigAddr.erase(a); if (big.empty()) mask &= ~(1ull << 40); }
+        if (h < 40) { sz[h].erase(a); cnt[h]--; if (sz[h].empty()) mask &= ~(1ull << h); }
+        else { big.erase({h, a}); bigAddr.erase(a); bigSum -= h; if (big.empty()) mask &= ~(1ull << 40); }
+    }
+    // суммарная длина дыр короче q (непригодных для труб длины >= q)
+    long long unusable(int q) const {
+        long long u = 0;
+        for (int sI = 1; sI < q && sI < 40; sI++) u += (long long)sI * cnt[sI];
+        return u;
     }
     // кандидат по правилу; maxSize ограничивает размер дыры (для P-труб в T-дырах). false — нет подходящей.
     // h == -1 в ответе: большая дыра (>= 40), длину уточняет вызывающий.
-    bool pick(Sel sel, bool tieHigh, int L, int maxSize, int& a, int& h) const {
+    bool pick(Sel sel, bool tieHigh, int L, int maxSize, int& a, int& h, int th = 0) const {
         uint64_t mm = mask & (~0ull << L);
         if (maxSize < 40) mm &= (2ull << maxSize) - 1;
         else if ((mm >> 40 & 1) && maxSize < (1 << 30) && big.begin()->first > maxSize) mm &= ~(1ull << 40);
@@ -122,6 +134,24 @@ struct HoleSet {
             if (mm >> 40 & 1) { a = big.rbegin()->second; h = big.rbegin()->first; }
             else { int s = clz64idx(mm); a = *sz[s].begin(); h = s; }
             return true;
+        case TFIT: {
+            if (L < 40 && (mask >> L & 1) && L <= maxSize) { a = *sz[L].begin(); h = L; return true; }
+            uint64_t hi = (L + th < 64) ? (mm & (~0ull << (L + th))) : 0;
+            int s;
+            if (hi) s = ctz64(hi);
+            else s = clz64idx(mm);   // нет «хороших» остатков: берём наибольшую дыру из имеющихся (остаток < th)
+            if (s < 40) { a = *sz[s].begin(); h = s; }
+            else { a = big.begin()->second; h = big.begin()->first; }
+            return true;
+        }
+        case NEAR: {   // дыра с остатком <= th (наименьшим), иначе — нет кандидата (труба пойдёт в хвост)
+            uint64_t m2 = mm & ((L + th < 63) ? ((2ull << (L + th)) - 1) : ~0ull);
+            if (!m2) return false;
+            int s = ctz64(m2);
+            if (s < 40) { a = *sz[s].begin(); h = s; }
+            else { a = big.begin()->second; h = big.begin()->first; }
+            return true;
+        }
         case EXACTWORST:
             if (L < 40 && (mask >> L & 1) && L <= maxSize) { a = *sz[L].begin(); h = L; return true; }
             if (mm >> 40 & 1) { a = big.rbegin()->second; h = big.rbegin()->first; }
@@ -143,6 +173,8 @@ struct Alloc {
     std::vector<int> pos, len;            // по PID (с 1)
     std::vector<uint8_t> cls;             // класс трубы: 0 = P (обычная), 1 = T (скоротечная)
     long long live = 0;
+    long long liveT = 0;                  // суммарная длина живых труб класса T
+    double emaT = 0;                      // скользящее среднее длины недавно уложенных T-труб
 
     Alloc() { pos.assign(1, -1); len.assign(1, 0); cls.assign(1, 0); }
 
@@ -160,18 +192,24 @@ struct Alloc {
         if (D > a) addHole(a, D - a, tag);
         if (D + L < a + h) addHole(D + L, a + h - (D + L), tag);
     }
-    void commit(int D, int L, int c) { pos.push_back(D); len.push_back(L); cls.push_back((uint8_t)c); live += L; }
+    void commit(int D, int L, int c) { pos.push_back(D); len.push_back(L); cls.push_back((uint8_t)c); live += L; if (c) { liveT += L; emaT = emaT == 0 ? L : emaT * 0.9 + L * 0.1; } }
 
     // уложить трубу длины L класса c; возвращает N (докопка в 20-метровых сегментах) и D (позиция)
     void place(const Pol& p, int L, int c, int& N, int& D) {
         N = 0;
         int a, h;
-        if (c == 1) {  // скоротечная: best fit по T-дырам, иначе новый чанк в хвосте
-            if (hs[1].pick(BEST, false, L, 1 << 30, a, h)) {
-                if (h < 0) h = holeLen(a);
-                D = a; carve(a, h, 1, D, L); commit(D, L, 1); return;
+        if (c == 1) {  // скоротечная: best fit по T-дырам (и, если разрешено, по U-дырам), иначе новый чанк в хвосте
+            int a1 = 0, h1 = 0, a0 = 0, h0 = 0;
+            bool f1 = hs[1].pick(BEST, false, L, 1 << 30, a1, h1);
+            bool f0 = p.tuU && hs[0].pick(BEST, false, L, 1 << 30, a0, h0);
+            if (f1 && h1 < 0) h1 = holeLen(a1);
+            if (f0 && h0 < 0) h0 = holeLen(a0);
+            if (f1 || f0) {
+                bool useT = f1 && (!f0 || h1 <= h0);
+                a = useT ? a1 : a0; h = useT ? h1 : h0;
+                D = a; carve(a, h, useT ? 1 : 0, D, L); commit(D, L, 1); return;
             }
-            int C = std::min(std::max(trench / p.Cdiv, p.Cmin), p.Cmax);
+            int C = std::min(std::max((int)(p.Cmode == 0 ? emaT * p.Cdiv : liveT / p.Cdiv), p.Cmin), p.Cmax);
             int need = std::max(C, L);
             int tailLen = trench - tailStart;
             if (tailLen < need) { N = (need - tailLen + 19) / 20; trench += 20 * N; }
@@ -187,8 +225,8 @@ struct Alloc {
         }
         // P: кандидаты из U-дыр и малых T-дыр
         int a0 = 0, h0 = 0, a1 = 0, h1 = 0;
-        bool f0 = hs[0].pick(p.sel, p.tieHigh, L, 1 << 30, a0, h0);
-        bool f1 = p.js >= 0 && hs[1].pick(p.sel, p.tieHigh, L, p.Tsmall, a1, h1);
+        bool f0 = hs[0].pick(p.sel, p.tieHigh, L, 1 << 30, a0, h0, p.th);
+        bool f1 = hs[1].pick(p.sel, p.tieHigh, L, p.js >= 0 ? p.Tsmall : (1 << 30), a1, h1, p.th);   // политики без арен видят T-дыры как обычные
         if (f0 && h0 < 0) h0 = holeLen(a0);
         if (f1 && h1 < 0) h1 = holeLen(a1);
         if (f0 || f1) {
@@ -221,6 +259,7 @@ struct Alloc {
         int tag = cls[pid];
         pos[pid] = -1;
         live -= l;
+        if (cls[pid]) liveT -= l;
         int s = p, e = p + l;
         auto it = byAddr.lower_bound(p);
         if (it != byAddr.begin()) {
@@ -336,16 +375,33 @@ struct Predictor {
 
 // ---------------------------------------------------------------- движок (портфель)
 
+struct EngineParams {   // параметры выбора лидера (стенд может менять)
+    double hyst = 0.01; // переключаться, только если лидер короче текущей на hyst*trench
+    int absMargin = 0;  // ... и минимум на столько клеток
+    int dwell = 500;    // минимум команд между переключениями
+    double beta = 0.0;  // вес прогноза по наклону: score = trench + beta * slope * t
+    double wfrac = 0.25;  // окно наклона = max(wmin, wfrac * t) команд
+    int wmin = 100;
+    double gamma = 0.5; // score = trench - gamma * (trench - live - unusable_holes) ... см. ниже
+    int qwin = 256;     // окно для квантиля длин
+    double qq = 0.25;   // квантиль
+};
+static EngineParams& engineParams() { static EngineParams ep; return ep; }
+static bool& dbgSwitch() { static bool b = false; return b; }
+
 struct Engine {
     Alloc real;
     std::vector<Alloc> sh;   // теневые симуляции чистых политик (пусто в режиме одной политики)
+    std::vector<std::vector<int>> hist;  // история длины траншеи каждой тени (по командам укладки)
     Predictor pred;
     int fixed;               // >= 0: одна чистая политика; -1: портфель
     int cur = 0;
-    double hyst = 0.0;       // гистерезис: переключаться, только если лидер короче текущей на hyst*trench
+    int sinceSwitch = 0;
+    int lenRing[4096];
+    int ringPos = 0;
 
     explicit Engine(int p = -1) : fixed(p) {
-        if (p < 0) sh.resize(NPOL);
+        if (p < 0) { sh.resize(NPOL); hist.resize(NPOL); }
     }
     static int classOf(const Pol& p, const float* pr) { return p.js >= 0 && pr[p.js] >= 0.5f ? 1 : 0; }
     void place(int L, int& N, int& D) {
@@ -355,9 +411,45 @@ struct Engine {
             real.place(POLS[fixed], L, classOf(POLS[fixed], pr), N, D);
         } else {
             for (int k = 0; k < NPOL; k++) { int n, d; sh[k].place(POLS[k], L, classOf(POLS[k], pr), n, d); }
+            const EngineParams& ep = engineParams();
+            sinceSwitch++;
+            for (int k = 0; k < NPOL; k++) hist[k].push_back(sh[k].trench);
+            int tt = (int)hist[0].size();
+            // квантиль длин недавних укладок
+            lenRing[ringPos % ep.qwin] = L; ringPos++;
+            int Lq = 1;
+            if (ep.gamma > 0) {
+                int hcnt[41] = {0}, n = std::min(ringPos, ep.qwin);
+                for (int i = 0; i < n; i++) hcnt[lenRing[i]]++;
+                int acc = 0, target = (int)(ep.qq * n);
+                for (Lq = 1; Lq < 40; Lq++) { acc += hcnt[Lq]; if (acc > target) break; }
+            }
+            auto score = [&](int k) {
+                double sc = sh[k].trench;
+                if (ep.gamma > 0) {
+                    double freeK = (double)sh[k].trench - (double)sh[k].live;
+                    double unus = (double)(sh[k].hs[0].unusable(Lq) + sh[k].hs[1].unusable(Lq));
+                    sc = (double)sh[k].live + (1.0 - ep.gamma) * freeK + ep.gamma * unus;
+                }
+                if (ep.beta > 0 && tt > ep.wmin) {
+                    int W = std::max(ep.wmin, (int)(ep.wfrac * tt));
+                    double slope = (double)(sh[k].trench - hist[k][tt - 1 - W]) / W;
+                    sc += ep.beta * slope * tt;
+                }
+                return sc;
+            };
             int best = cur;
-            for (int k = 0; k < NPOL; k++) if (sh[k].trench < sh[best].trench) best = k;
-            if (best != cur && sh[best].trench < sh[cur].trench - hyst * sh[cur].trench) cur = best;
+            double bs = score(cur);
+            for (int k = 0; k < NPOL; k++) { double sk = score(k); if (sk < score(best)) best = k; }
+            if (best != cur && sinceSwitch >= ep.dwell && score(best) < bs - ep.hyst * bs - ep.absMargin) {
+                if (dbgSwitch()) {
+                    fprintf(stderr, "t=%d switch %s -> %s  trench: real=%d", pred.t, POLS[cur].name, POLS[best].name, real.trench);
+                    for (int k = 0; k < NPOL; k++) fprintf(stderr, " %s=%d", POLS[k].name, sh[k].trench);
+                    fputc('\n', stderr);
+                }
+                cur = best;
+                sinceSwitch = 0;
+            }
             real.place(POLS[cur], L, classOf(POLS[cur], pr), N, D);
         }
         pred.tick();
@@ -372,19 +464,49 @@ struct Engine {
 
 #ifndef SIM
 // ---------------------------------------------------------------- ввод-вывод (боевой режим)
+#ifdef _MSC_VER
+#define GETC _getchar_nolock
+#else
+#define GETC getchar_unlocked
+#endif
+static bool readInt(int& x) {
+    int c = GETC();
+    while (c != EOF && c != '-' && (c < '0' || c > '9')) c = GETC();
+    if (c == EOF) return false;
+    bool neg = false;
+    if (c == '-') { neg = true; c = GETC(); }
+    int v = 0;
+    while (c >= '0' && c <= '9') { v = v * 10 + (c - '0'); c = GETC(); }
+    x = neg ? -v : v;
+    return true;
+}
+static void writeInts(int a, int b, bool two) {
+    char buf[32];
+    int n = 0;
+    auto put = [&](int v) {
+        char t[12]; int k = 0;
+        if (v == 0) t[k++] = '0';
+        while (v > 0) { t[k++] = (char)('0' + v % 10); v /= 10; }
+        while (k) buf[n++] = t[--k];
+    };
+    put(a);
+    if (two) { buf[n++] = ' '; put(b); }
+    buf[n++] = '\n';
+    fwrite(buf, 1, n, stdout);
+    fflush(stdout);
+}
 int main() {
     Engine eng(-1);
     int c;
-    while (scanf("%d", &c) == 1) {
+    while (readInt(c)) {
         if (c == 0) return 0;
         if (c > 0) {
             int N, D;
             eng.place(c, N, D);
-            printf("%d %d\n", N, D);
+            writeInts(N, D, true);
         } else {
-            printf("%d\n", eng.remove(-c));
+            writeInts(eng.remove(-c), 0, false);
         }
-        fflush(stdout);
     }
 }
 #endif
