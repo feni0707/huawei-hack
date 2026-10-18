@@ -23,8 +23,10 @@ typedef long long ll;
 // P21 мин. число пар удалений для включения, P22 порог каппы, P23 затухание рождений, P24 затухание пар
 // P15 мёртвый остаток >= P15 — в хвост (0 выкл), P16 штраф мёртвого остатка с учётом риска смерти соседей
 //      0  1      2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19
-static double P[32] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.5, 2, 0, 3, 0, 0, 0, 0, 3, 4, 0,
-                       400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98};
+// P13 «крошечная траншея» (T < P13): точное попадание, иначе самая большая дыра; P32 — штраф точного
+//      попадания у соседа с высокой долей смертей его длины (только в этом режиме)
+static double P[40] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.5, 2, 0, 3, 60, 0, 0, 0, 3, 4, 0,
+                       400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000};
 
 // ---------------------------------------------------------------- аллокатор
 // Свободные промежутки: граничные метки (склейка за O(1)) + корзины по точной длине (< NB) + set для больших.
@@ -172,6 +174,7 @@ struct Alloc {
     double hz2(int p) const { return P[18] == 4 ? hzRate(p) : P[18] == 1 ? pdieLen(p) : P[18] == 2 ? std::max(pdieLen(p), hazard(p)) : P[18] == 3 ? pdieLen(p) * hazard(p) : hazard(p); }
 #ifdef SIM
     unsigned long long rs = 88172645463325252ULL; int epsRand = 0;
+    int forcePid = -1, forceAlt = 0, listPid = -1, optBest = 0; std::vector<int> optList;
     unsigned long long rng() { rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17; return rs; }
 #endif
     const int* oracleDeath = nullptr;   // только SIM-эксперименты: время смерти по PID (команда), -1 — не умрёт
@@ -268,7 +271,11 @@ struct Alloc {
         int M = P[4] > 0 ? (int)P[4] : 1;  // сколько промежутков каждой длины смотреть
         auto eval = [&](int gs, int s) {
             double cst;
-            if (P[14] == 1) {
+            if (P[13] > 0 && T < P[13]) {
+                // крошечная траншея: точное попадание (если сосед не «умирающий»), иначе самая большая дыра
+                if (s == L) cst = -1000 + P[32] * std::max(pdieLen(pidLeftOf(gs)), pdieLen(pidRightOf(gs + s)));
+                else cst = -s;
+            } else if (P[14] == 1) {
                 cst = gs;                                   // first fit по адресу
             } else if (P[14] == 2) {
                 cst = -s;                                   // worst fit
@@ -311,6 +318,16 @@ struct Alloc {
             }
         }
 #ifdef SIM
+        if (forcePid == pid) {
+            // принудительное отклонение: forceAlt = -1 — хвост, иначе дыра размера forceAlt
+            if (forceAlt < 0) bgs = -1;
+            else { bgs = -1; for (int g : bucket[forceAlt]) if (g != ts && g + forceAlt != F) { bgs = g; bs = forceAlt; bestC = 0; break; } }
+        }
+        if (listPid == pid) {
+            optBest = bgs >= 0 ? bs : -1; optList.clear();
+            for (int s = L; s < NB; s++) for (int g : bucket[s]) { if (g == ts || g + s == F) continue; optList.push_back(s); break; }
+            optList.push_back(-1);
+        }
         if (epsRand > 0 && (rng() % 1000) < epsRand) {
             // случайный выбор: любая подходящая дыра (по одной на размер) или хвост
             int opts[NB + 2], no = 0;
@@ -430,16 +447,43 @@ static std::vector<int> readTest(const char* fn, double& w) {
     fclose(f);
     return c;
 }
+// T в конце прогона (или -1 при ошибке); force/list — для анализа важности решений
+static ll runOnce(const std::vector<int>& cmd, int forcePid, int forceAlt, int listPid, Alloc** keep) {
+    Alloc* A = new Alloc();
+    A->forcePid = forcePid; A->forceAlt = forceAlt; A->listPid = listPid;
+    int ci = 0;
+    for (int c : cmd) { A->curCmd = ci++; if (c > 0) A->place(c); else A->remove(-c); }
+    ll T = A->T;
+    if (keep) *keep = A; else delete A;
+    return T;
+}
 int main(int argc, char** argv) {
     if (const char* s = getenv("SF")) {
         // формат: "i=v i=v ..."
         char* p = (char*)s;
         while (*p) {
             char* q; long i = strtol(p, &q, 10); if (q == p || *q != '=') break;
-            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 32) P[i] = v; p = q;
+            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 40) P[i] = v; p = q;
         }
     }
     bool quiet = getenv("SFQ") != nullptr;
+    if (getenv("SFIMPORT")) {
+        double w; std::vector<int> cmd = readTest(argv[1], w);
+        ll T0 = runOnce(cmd, -1, 0, -1, nullptr);
+        int np = 0; for (int c : cmd) if (c > 0) np++;
+        printf("base T=%lld\n", T0);
+        for (int p = 1; p <= np; p++) {
+            Alloc* A; runOnce(cmd, -1, 0, p, &A);
+            std::vector<int> opts = A->optList; int best = A->optBest; int L = A->len[p];
+            delete A;
+            for (int o : opts) {
+                if (o == best) continue;
+                ll T = runOnce(cmd, p, o, -1, nullptr);
+                if (T != T0) printf("pid=%d L=%d best=%d alt=%d dT=%lld\n", p, L, best, o, T - T0);
+            }
+        }
+        return 0;
+    }
     double total = 0, wsum = 0;
     for (int a = 1; a < argc; a++) {
         double w; std::vector<int> cmd = readTest(argv[a], w);
@@ -447,6 +491,8 @@ int main(int argc, char** argv) {
         std::vector<int> death(1, -1);
         { int p = 0; for (size_t i = 0; i < cmd.size(); i++) { if (cmd[i] > 0) { death.push_back(-1); p++; } else death[-cmd[i]] = (int)i; } }
         A.oracleDeath = death.data();
+        if (getenv("SFFORCE")) { A.forcePid = atoi(getenv("SFFORCE")); A.forceAlt = atoi(getenv("SFALT")); }
+        if (getenv("SFLIST")) A.listPid = atoi(getenv("SFLIST"));
         if (getenv("SFEPS")) { A.epsRand = atoi(getenv("SFEPS")); A.rs ^= (unsigned long long)atoll(getenv("SFSEED")) * 0x9E3779B97F4A7C15ULL + 1; }
         std::vector<int> cells;  // pid или 0
         std::vector<int> lastLen, freedAt;
