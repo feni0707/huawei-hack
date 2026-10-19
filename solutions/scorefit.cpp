@@ -53,7 +53,8 @@ static const int CHUNK = 400, CHUNK_SAME = 800;   // участок под по�
 static const int CHUNK_MIN = 200, CHUNK_PER_L = 10;   // нижняя граница участка, пока потоки не доказали экономию
 static const int CHUNK_LOW = 40, CHUNK_LOW_AGE = 1000;   // нижняя граница, если тень долго не видит экономии
 static const int EARLY_RUN = 64, EARLY_MAXL = 3, EARLY_CHUNK = 40;   // потоки по чётности до первых удалений (см. chooseStream)
-static const int FIT_EXTRA = 4, FIT_RUN = 30;   // подгонка участка под длину серии (см. fitChunk)
+static const int FIT_EXTRA = 4, FIT_RUN = 30;
+static const int MULTI_K = 3; static const ll MULTI_T = 50000;   // кандидатов каждой длины в большой траншее   // подгонка участка под длину серии (см. fitChunk)
 static const ll SHADOW_MAX_T = 3000000;   // тень удваивает память; в траншее длиннее участок C/2 ничтожен — тень удаляем
 // Зоны по длинам (см. zoneTry): слотов в участке, мин. доля длины среди недавних укладок, макс. число таких длин,
 // макс. доля самой частой длины, мин. число живых труб длины для своего участка.
@@ -275,6 +276,20 @@ struct Alloc {
         for (int i = 0; i < nk; i++) h.push(keep[i]);
         return res;
     }
+    // До k действительных промежутков длины s (по адресу), кроме хвоста и граничного; элементы кучи — на место.
+    int someGaps(int s, int ts, int k, int* out) {
+        if (gapCnt[s] == 0) return 0;
+        Heap& h = bucket[s];
+        int keep[16], nk = 0, no = 0;
+        while (!h.empty() && nk < 16 && no < k) {
+            int g = (int)h.top(); h.pop();
+            if (tag.get(g) != s || (nk > 0 && keep[nk - 1] == g)) continue;
+            keep[nk++] = g;
+            if (g != ts && g + s != F) out[no++] = g;
+        }
+        for (int i = 0; i < nk; i++) h.push(keep[i]);
+        return no;
+    }
     // То же для больших промежутков: самый короткий (среди равных — левый). Возвращает start, длину — в outLen.
     int firstBig(int ts, int& outLen) {
         ll keep[3]; int nk = 0, res = -1;
@@ -427,6 +442,10 @@ struct Alloc {
         for (int s = 0; s < NB; s++) for (int l = 1; l <= MAXL; l++) logSL[s][l] = s > 0 ? std::log((double)s / l) : 0;
     }
     static double log1n(int n) { return n < LOGN ? logN[n] : std::log(1.0 + n); }
+    // верхняя граница разброса gapCost между промежутками одной длины (признаки соседей: LW7, 8, 9, 15, 17)
+    static double nbW(int r) {
+        return dabs(LW[7]) + dabs(LW[8]) * r + dabs(LW[9]) + dabs(LW[15]) + dabs(LW[17]) + 1;
+    }
     // стоимость укладки трубы L в промежуток gs длины s (меньше — лучше)
     double gapCost(int gs, int s, int L, int st, int m, double selfHz) const {
         if (T < 60) {   // крошечная траншея
@@ -661,11 +680,23 @@ struct Alloc {
         verB = bornLab[1] >= 20 && bornLab[0] >= 20 && diedLab[1] / bornLab[1] - diedLab[0] / bornLab[0] > 0.9;
 
         double bestC = 1e18; int bgs = -1, bs = 0;
+        // в большой траншее вне потоков — до MULTI_K промежутков каждой длины: оценка различает их по риску соседей
+        // (two_phase_real +0.03 %, 15 +0.05 %); в маленькой — только самый левый (там это шум: alternating −0.03 %)
+        bool multi = st < 0 && T >= MULTI_T;
         for (int s = L; s < NB; s++) {
             int g = firstGap(s, ts);
             if (g < 0) continue;
             double c = zoneBlocked(g, s, st) ? 1e17 : gapCost(g, s, L, st, m, selfHz);
             if (c < bestC) { bestC = c; bgs = g; bs = s; }
+            // промежутки той же длины отличаются только признаками соседей (их вклад ≤ nbW): если и с ним первый
+            // не лучше лучшего, остальные смотреть незачем (ответы те же, CPU меньше)
+            if (multi && c < 1e17 && c - nbW(s - L) < bestC) {
+                int gk[MULTI_K]; int ng = someGaps(s, ts, MULTI_K, gk);
+                for (int i = 1; i < ng; i++) {
+                    double c2 = zoneBlocked(gk[i], s, st) ? 1e17 : gapCost(gk[i], s, L, st, m, selfHz);
+                    if (c2 < bestC) { bestC = c2; bgs = gk[i]; bs = s; }
+                }
+            }
         }
         {
             int bl = 0, g = firstBig(ts, bl);
