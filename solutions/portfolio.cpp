@@ -395,6 +395,23 @@ struct Alloc {
         commit(D, L, 0);
     }
 
+    // Собрать состояние траншеи по готовой раскладке: ps[pid] — позиция живой трубы (или -1), ls[pid] — длина, trenchLen — длина траншеи
+    void buildFrom(const std::vector<int>& ps, const std::vector<int>& ls, long long trenchLen) {
+        pos = ps; len = ls; cls.assign(ps.size(), 0);
+        live = 0; liveT = 0; emaT = 0;
+        startTab = HTab(); endTab = HTab(); hs[0] = HoleSet(); hs[1] = HoleSet();
+        std::vector<std::pair<int, int>> pl;
+        for (size_t pid = 1; pid < ps.size(); pid++) if (ps[pid] >= 0) { pl.push_back({ps[pid], (int)pid}); live += ls[pid]; }
+        std::sort(pl.begin(), pl.end());
+        int end = 0;
+        for (auto& pr : pl) {
+            if (pr.first > end) addHole(end, pr.first - end, 0);
+            end = pr.first + ls[pr.second];
+        }
+        tailStart = end;
+        trench = (int)trenchLen;
+    }
+
     int remove(int pid) {
         int p = pos[pid], l = len[pid];
         int tag = cls[pid];
@@ -614,6 +631,7 @@ struct Engine {
     int cmds = 0;
     int startIdx = 0;
     int candPol = -1, candCnt = 0;   // претендент и число подряд оценок, на которых он лидирует
+    bool skipReal = false;   // режим «досинхронизации»: тени и предсказатель обрабатывают историю, реальная траншея не трогается
     bool lean = false;       // аварийный режим: теней и предсказателя нет, реальная траншея ведётся одной политикой
     double leanPerCmd = LEAN_PER_CMD;   // порог CPU на команду: 5 с / 200000 = 25 мкс, берём запас
 
@@ -684,7 +702,7 @@ struct Engine {
 #endif
         cmds++;
         if (fixed >= 0) {
-            real.place(POLS[fixed], L, classOf(POLS[fixed], pr), N, D);
+            if (!skipReal) real.place(POLS[fixed], L, classOf(POLS[fixed], pr), N, D);
         } else {
             const EngineParams& ep = engineParams();
             for (int k = 0; k < NPOL; k++) { int n, d; sh[k].place(POLS[k], L, classOf(POLS[k], pr), n, d); }
@@ -721,7 +739,7 @@ struct Engine {
                     candPol = -1; candCnt = 0;
                 }
             }
-            real.place(POLS[cur], L, classOf(POLS[cur], pr), N, D);
+            if (!skipReal) real.place(POLS[cur], L, classOf(POLS[cur], pr), N, D);
         }
         if (usePred) pred.tick();
     }
@@ -729,11 +747,22 @@ struct Engine {
         cmds++;
         if (usePred) { pred.onDelete(pid); pred.tick(); }
         for (auto& a : sh) a.remove(pid);
-        return real.remove(pid);
+        return skipReal ? 0 : real.remove(pid);
+    }
+    // Подхватить уже начатую раскладку: тени проигрывают историю команд сами, реальная траншея строится по фактическим позициям
+    void bootstrap(const std::vector<int>& hist, const std::vector<int>& posByPid, const std::vector<int>& lenByPid, long long trenchLen) {
+        skipReal = true;
+        for (int c : hist) {
+            if (c > 0) { int N, D; place(c, N, D); }
+            else remove(-c);
+        }
+        skipReal = false;
+        real.buildFrom(posByPid, lenByPid, trenchLen);
+        cur = (placed < engineParams().startCmds && engineParams().startCmds > 0) ? startIdx : 0;   // как у обычного старта
+        sinceSwitch = 0; candPol = -1; candCnt = 0;
     }
 };
 
-#ifndef SIM
 // ---------------------------------------------------------------- ввод-вывод (боевой режим)
 #if defined(_MSC_VER)
 #define GETC _getchar_nolock
@@ -768,6 +797,8 @@ static void writeInts(int a, int b, bool two) {
     fwrite(buf, 1, n, stdout);
     fflush(stdout);
 }
+// ---- MAIN ----
+#ifndef SIM
 #ifndef FIXED_POL
 #define FIXED_POL -1
 #endif
