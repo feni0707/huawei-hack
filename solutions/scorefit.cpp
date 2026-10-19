@@ -29,6 +29,7 @@
 //      15: 0.953 → 0.961. Редкие длины в это время — «точно / остаток ≥ m самого редкого размера / хвост».
 //   7. Признак LW25: изменение избытка дыр над ожидаемым спросом (держать разнообразие размеров дыр, чтобы
 //      следующие трубы находили точные дыры).
+//   8. Сторона остатка — по «гонке соседей» (какой из соседей промежутка умирает первым), если статистика уверенная.
 //
 // Код написан с оглядкой на перенос на Cangjie: без std::set/map/priority_queue и лямбд — кучи и
 // постраничные массивы сделаны вручную, все структуры — массивы.
@@ -152,6 +153,11 @@ struct Alloc {
     double bornLab[2], diedLab[2];       // проверка прогноза: рождения и смерти среди помеченных A/B
     // порядок смертей: средняя доля живых, которые моложе удаляемой трубы (0 — умирают свежие, 1 — старые), с затуханием
     double qSum = 0, qTot = 0;
+    // «гонка соседей»: у промежутков, куда клали с остатком, какой из двух соседей (старший/младший) умер первым
+    // (затухание 0.99). Записи — списки по PID: raceHead[p] -> элемент e (запись e/2), raceNext[e], raceOther[e].
+    double raceOld = 0, raceTot = 0;
+    std::vector<int> raceHead, raceNext, raceOther;
+    std::vector<char> raceDone;
     int lastDelPid = 0; bool lastWasDel = false;
 
     Alloc() {
@@ -164,6 +170,7 @@ struct Alloc {
         for (int i = 0; i < NB; i++) gapCnt[i] = 0;
         for (int i = 0; i < 24; i++) deathAge[i] = 0;
         aliveBit.assign(BITN, 0);
+        raceHead.assign(1024, -1);
         for (int f = 0; f < NF; f++) {
             coSame[f] = coTot[f] = 0;
             for (int v = 0; v < 2; v++) birthV[f][v] = deathV[f][v] = 0;
@@ -320,7 +327,29 @@ struct Alloc {
     }
     // Сосед, к которому ляжет остаток (вне потоков): обычно умирают свежие — к более молодому (больший PID);
     // если умирают скорее старые (очередь) — к более старому, но не к краю траншеи (PID 0).
-    bool oldDieFirst() const { return qTot >= 20 && qSum / qTot > 0.5; }
+    // Если гонка соседей уверенно (доля вне 0.3..0.7) говорит, кто из соседей промежутка умирает первым, — по ней:
+    // при смеси очереди и стека средний ранг удаляемых (qSum) ошибается (queue_mix: 0.934 → 0.959).
+    bool oldDieFirst() const {
+        if (raceTot >= 20 && dabs(raceOld / raceTot - 0.5) > 0.2) return raceOld > 0.5 * raceTot;
+        return qTot >= 20 && qSum / qTot > 0.5;
+    }
+    void raceAdd(int a, int b) {   // a, b — живые соседи промежутка
+        if ((int)raceHead.size() < (int)pos.size() + 1) raceHead.resize(pos.size() + 1024, -1);
+        int id = (int)raceDone.size();
+        raceDone.push_back(0);
+        raceNext.push_back(raceHead[a]); raceOther.push_back(b); raceHead[a] = 2 * id;
+        raceNext.push_back(raceHead[b]); raceOther.push_back(a); raceHead[b] = 2 * id + 1;
+    }
+    void raceOnDeath(int p) {
+        if (p >= (int)raceHead.size()) return;
+        for (int e = raceHead[p]; e >= 0; e = raceNext[e]) {
+            if (raceDone[e >> 1]) continue;
+            raceDone[e >> 1] = 1;
+            raceOld = raceOld * 0.99 + (p < raceOther[e] ? 1 : 0);
+            raceTot = raceTot * 0.99 + 1;
+        }
+        raceHead[p] = -1;
+    }
     int sideNb(int lp, int rp) const {
         if (oldDieFirst()) { if (lp == 0) return rp; if (rp == 0) return lp; return lp < rp ? lp : rp; }
         return lp > rp ? lp : rp;
@@ -540,6 +569,7 @@ struct Alloc {
         if (useGap && st < 0 && T - tailStart() >= L && LW[13] < bestC) useGap = false;
 
         if (useGap) {
+            if (bs > L) { int lp = pidLeftOf(bgs), rp = pidRightOf(bgs + bs); if (lp > 0 && rp > 0) raceAdd(lp, rp); }
             D = chooseSide(bgs, bs, L, st);
             takeFrom(bgs, D, L);
         } else {
@@ -595,6 +625,7 @@ struct Alloc {
             qSum = qSum * 0.99 + q; qTot = qTot * 0.99 + 1;
         }
         bitAdd(pid, -1); alive[pid] = 0;
+        raceOnDeath(pid);
         deathAge[ageBucket((int)pos.size() - 1 - pid)] += 1;
         for (int k = 1; k <= MAXL; k++) recDel[k] *= 0.98;
         recDelTot = recDelTot * 0.98 + 1; recDel[l] += 1; aliveCntL[l]--; aliveTot--;

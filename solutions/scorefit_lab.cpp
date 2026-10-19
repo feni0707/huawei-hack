@@ -34,7 +34,9 @@ typedef long long ll;
 //      P89 прогрев признака LW25 (cntTot); P90 участок внутри незарезервированной дыры до хвоста; P91 мин. доля удалений
 //      «по стеку длины» (среди 8 последних той же длины) для зон; LW24 хвост с докопкой, LW25/LW26 изменение избытка дыр над спросом
 // P56 сторона остатка по порядку смертей (умирают старые — к старшему соседу), P57 затухание этой статистики
-static double P[96] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.9, 2, 0, 3, 60, 6, 0, 0, 3, 4, 0, 400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 2, 0, 0, 0.3, 0, 0.99, 0.05, 0, 0, 0, 0, 1, 0, 0, 0, 8, 0.999, 1.5, 0, 0, 0, 0, 2, 1, 0.99, 0, 1, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 16, 0.08, 8, 0, 0.25, 150, 0.7, 0.97, 300, 1, 0.7};
+// P92 «гонка соседей» (какой из соседей промежутка с остатком умер первым) вместо P56, если доля дальше P95 от 0.5;
+//      P93 затухание; P92 = 2..5 — статистика по ключам (возраст/длины соседей, P94 мин. наблюдений), не лучше 1
+static double P[96] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.9, 2, 0, 3, 60, 6, 0, 0, 3, 4, 0, 400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 2, 0, 0, 0.3, 0, 0.99, 0.05, 0, 0, 0, 0, 1, 0, 0, 0, 8, 0.999, 1.5, 0, 0, 0, 0, 2, 1, 0.99, 0, 1, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 16, 0.08, 8, 0, 0.25, 150, 0.7, 0.97, 300, 1, 0.7, 1, 0.99, 20, 0.2};
 
 // P14=6 (по умолчанию): линейная оценка кандидатов вне потоков, веса LW (env SFW="w0 w1 ..." — переопределить);
 // старое поведение (best fit + правила) — SF="14=0 15=4"
@@ -319,6 +321,8 @@ struct Alloc {
             if (lp > rp) return gs + r;
             return gs;
         }
+        bool rOld;
+        if (P[8] == 1 && P[92] >= 2 && lp > 0 && rp > 0 && raceSays(lp, rp, rOld)) return (rOld == (lp < rp)) ? gs + r : gs;
         if (P[8] == 1) {
             if (P[56] != 0 && oldDieFirst()) {   // P56: умирают скорее старые (очередь) — остаток к старшему соседу
                 if (lp == 0) return gs;
@@ -333,8 +337,58 @@ struct Alloc {
     }
     // средний нормированный ранг удаляемой трубы среди живых (0 — самая молодая, 1 — самая старая), с затуханием
     double qSum = 0, qTot = 0;
-    bool oldDieFirst() const { return qTot >= 20 && qSum / qTot > 0.5; }
+    // P92: «гонка соседей» — у дыр, куда клали с остатком, какой из двух соседей (старший/младший) умер первым
+    // (затухание P93); если наблюдений >= 20 — сторона остатка по этой статистике вместо qSum
+    double raceOld = 0, raceTot = 0;
+    std::vector<int> raceHead, raceNext, raceOther;   // по PID — список записей; запись = пара (сосед, другой сосед)
+    std::vector<char> raceDone;
+    // ключ записи (P92): 1 — один на всех; 2 — корзина возраста старшего соседа; 3 — (корзина старшего, корзина младшего);
+    // 4 — длины соседей (короткая/длинная относительно медианы недавних укладок) у старшего и младшего
+    std::vector<int> raceKey;
+    double raceOldK[600] = {0}, raceTotK[600] = {0};
+    int raceKeyOf(int a, int b) const {   // a — старший (меньший PID)
+        int cur = (int)pos.size() - 1;
+        int ba = ageBucket(cur - a), bb = ageBucket(cur - b);
+        if (P[92] == 2) return 1 + ba;
+        if (P[92] == 3) return 1 + ba * 24 + bb;
+        if (P[92] == 4) return 1 + (len[a] >= 8) * 2 + (len[b] >= 8);
+        if (P[92] == 5) return 1 + (ba - bb > 2 ? 2 : ba - bb);
+        return 0;
+    }
+    bool raceSays(int lp, int rp, bool& older) const {   // true — есть статистика; older — остаток к старшему
+        int a = lp < rp ? lp : rp, b = lp < rp ? rp : lp;
+        int k = raceKeyOf(a, b);
+        if (k > 0 && k < 600 && raceTotK[k] >= P[94] && std::fabs(raceOldK[k] / raceTotK[k] - 0.5) > P[95]) { older = raceOldK[k] > 0.5 * raceTotK[k]; return true; }
+        if (raceTot >= 20 && std::fabs(raceOld / raceTot - 0.5) > P[95]) { older = raceOld > 0.5 * raceTot; return true; }
+        return false;
+    }
+    void raceAdd(int a, int b) {   // a, b — живые соседи дыры
+        if ((int)raceHead.size() < (int)pos.size() + 1) raceHead.resize(pos.size() + 1024, -1);
+        int id = (int)raceDone.size(); raceDone.push_back(0);
+        raceKey.push_back(raceKeyOf(a < b ? a : b, a < b ? b : a));
+        int pr[2] = {a, b};
+        for (int k = 0; k < 2; k++) { raceNext.push_back(raceHead[pr[k]]); raceOther.push_back(pr[k ^ 1]); raceHead[pr[k]] = 2 * id + k; }
+    }
+    void raceOnDeath(int p) {
+        if (p >= (int)raceHead.size()) return;
+        for (int e = raceHead[p]; e >= 0; e = raceNext[e]) {
+            int id = e >> 1;
+            if (raceDone[id]) continue;
+            raceDone[id] = 1;
+            int o = p < raceOther[e] ? 1 : 0;
+            raceOld = raceOld * P[93] + o; raceTot = raceTot * P[93] + 1;
+            int k = raceKey[id];
+            if (k > 0 && k < 600) { raceOldK[k] = raceOldK[k] * P[93] + o; raceTotK[k] = raceTotK[k] * P[93] + 1; }
+        }
+        raceHead[p] = -1;
+    }
+    bool oldDieFirst() const {
+        if (P[92] != 0 && raceTot >= 20 && std::fabs(raceOld / raceTot - 0.5) > P[95]) return raceOld > 0.5 * raceTot;
+        return qTot >= 20 && qSum / qTot > 0.5;
+    }
     int sideNb(int lp, int rp) const {   // сосед, к которому ляжет остаток (вне потоков)
+        bool rOld;
+        if (P[92] >= 2 && lp > 0 && rp > 0 && raceSays(lp, rp, rOld)) return rOld ? (lp < rp ? lp : rp) : (lp > rp ? lp : rp);
         if (P[56] != 0 && oldDieFirst()) { if (lp == 0) return rp; if (rp == 0) return lp; return lp < rp ? lp : rp; }
         return lp > rp ? lp : rp;
     }
@@ -665,6 +719,7 @@ struct Alloc {
         if (useGap && P[45] != 0 && st < 0 && bs > L && bs - L < m && bs - L >= std::max(1.0, P[46]) &&
             T - tailStart() >= L) useGap = false;
         if (useGap) {
+            if (P[92] != 0 && bs > L) { int lp = pidLeftOf(bgs), rp = pidRightOf(bgs + bs); if (lp > 0 && rp > 0) raceAdd(lp, rp); }
             D = chooseSide(bgs, bs, L, st);
             takeFrom(bgs, D, L);
         } else {
@@ -723,6 +778,7 @@ return finishPlace(pid, L, D, N, st, useGap, bs);
             qSum = qSum * P[57] + q; qTot = qTot * P[57] + 1;
         }
         alive[pid] = 0; bitAdd(pid, -1); deathL[l] += 1; bOnDeath(pid);
+        if (P[92] != 0) raceOnDeath(pid);
         for (int k = 1; k <= MAXL; k++) recDel[k] *= P[31];
         recDelTot = recDelTot * P[31] + 1; recDel[l] += 1; aliveCntL[l]--; aliveTot--;
         if (P[61] >= 2) for (int m = 2; m <= (int)P[61]; m++) {
