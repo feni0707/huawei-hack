@@ -27,7 +27,10 @@ typedef long long ll;
 //      попадания у соседа с высокой долей смертей его длины (только в этом режиме)
 // P33=1 — правило P15 только вне потоков, P33=2 — промежутки с мёртвым остатком ≥ P15 исключаются из кандидатов (вне потоков); P36 — мин. доля редкого значения признака для каппы;
 // P39 — штраф замуровывания, только если s + len(соседа) встречается среди недавних укладок с долей ≥ P39
-static double P[64] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.5, 2, 0, 3, 60, 6, 0, 0, 3, 4, 0, 400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 2, 0, 0, 0.3, 0, 0.99, 0.05, 0, 0, 0, 0, 1, 0, 0, 0, 8, 0.999, 1.5};
+// P53 эндшпиль (последние P53 команд до лимита P54 или 200000 — чистый best fit; вредно, выкл.);
+// P55 зона B при подтверждённых потоках (порог P9): 1 — B только в дыры между B, 2 — ещё и A не в дыры между двумя B;
+// P56 сторона остатка по порядку смертей (умирают старые — к старшему соседу), P57 затухание этой статистики
+static double P[64] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.9, 2, 0, 3, 60, 6, 0, 0, 3, 4, 0, 400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 2, 0, 0, 0.3, 0, 0.99, 0.05, 0, 0, 0, 0, 1, 0, 0, 0, 8, 0.999, 1.5, 0, 0, 0, 0, 2, 1, 0.99};
 
 // P14=6 (по умолчанию): линейная оценка кандидатов вне потоков, веса LW (env SFW="w0 w1 ..." — переопределить);
 // старое поведение (best fit + правила) — SF="14=0 15=4"
@@ -267,9 +270,24 @@ struct Alloc {
             if (lp > rp) return gs + r;
             return gs;
         }
-        if (P[8] == 1) { if (lp > rp) return gs + r; }
+        if (P[8] == 1) {
+            if (P[56] != 0 && oldDieFirst()) {   // P56: умирают скорее старые (очередь) — остаток к старшему соседу
+                if (lp == 0) return gs;
+                if (rp == 0) return gs + r;
+                if (lp < rp) return gs + r;
+                return gs;
+            }
+            if (lp > rp) return gs + r;
+        }
         else if (P[8] == 3) return gs + r;
         return gs;
+    }
+    // средний нормированный ранг удаляемой трубы среди живых (0 — самая молодая, 1 — самая старая), с затуханием
+    double qSum = 0, qTot = 0;
+    bool oldDieFirst() const { return qTot >= 20 && qSum / qTot > 0.5; }
+    int sideNb(int lp, int rp) const {   // сосед, к которому ляжет остаток (вне потоков)
+        if (P[56] != 0 && oldDieFirst()) { if (lp == 0) return rp; if (rp == 0) return lp; return lp < rp ? lp : rp; }
+        return lp > rp ? lp : rp;
     }
 
     std::pair<ll,ll> place(int L) {
@@ -300,6 +318,11 @@ struct Alloc {
             selfHz = std::min(1.0, (recDel[L] / recDelTot) / ((double)std::max(1, aliveCntL[L]) / std::max(1, aliveTot)) / P[30]);
         double bestC = 1e18; int bgs = -1, bs = 0;
         int M = P[4] > 0 ? (int)P[4] : 1;  // сколько промежутков каждой длины смотреть
+        // P53 > 0: последние P53 команд до лимита 200000 (P54 — лимит, если задан) — будущего почти нет
+        bool endgame = P[53] > 0 && curCmd >= (P[54] > 0 ? P[54] : 200000) - P[53];
+        bool verifiedB = P[12] == 3 && bornLab[1] >= 20 && bornLab[0] >= 20 &&
+            diedLab[1] / bornLab[1] - diedLab[0] / bornLab[0] > P[9];
+        bool bToFront = st == 1 && verifiedB;
         auto eval = [&](int gs, int s) {
             double cst;
             if (P[13] > 0 && T < P[13]) {
@@ -321,7 +344,7 @@ struct Alloc {
                 int r = s - L;
                 int lp = pidLeftOf(gs), rp = pidRightOf(gs + s);
                 double hl = hazard(lp), hr = hazard(rp);
-                double hside = lp > rp ? hl : hr;          // остаток — к более молодому соседу
+                double hside = sideNb(lp, rp) == lp ? hl : hr;   // остаток — к соседу, который скорее умрёт
                 bool dead = r > 0 && r < m;
                 double dr = (r >= 1 && r <= MAXL && cntTot > 0) ? cnt[r] / cntTot : 0;
                 double ds = (s <= MAXL && cntTot > 0) ? cnt[s] / cntTot : 0;
@@ -384,6 +407,15 @@ struct Alloc {
                 if (s == L) cst += tieAge * 1e-7 * old;        // точное — между старыми
                 else cst -= tieAge * 1e-7 * young;             // остаток — к молодому
             }
+            if (endgame && st < 0) cst = s - L;   // P53: эндшпиль — чистый best fit по дырам
+            if (bToFront && P[55] != 0) {   // P55: подтверждённый B — только в дыры, где оба соседа из B (или край)
+                int lp = pidLeftOf(gs), rp = pidRightOf(gs + s);
+                if ((lp > 0 && stream[lp] != 1) || (rp > 0 && stream[rp] != 1)) cst = 1e17;
+            }
+            if (verifiedB && st == 0 && P[55] == 2) {   // P55=2: A не занимает дыры между двумя B — они для B
+                int lp = pidLeftOf(gs), rp = pidRightOf(gs + s);
+                if (lp > 0 && rp > 0 && stream[lp] == 1 && stream[rp] == 1) cst = 1e17;
+            }
             if (cst < bestC) { bestC = cst; bgs = gs; bs = s; }
         };
         for (int s = L; s < NB; s++) {
@@ -424,8 +456,7 @@ struct Alloc {
         ll N = 0; int D;
         bool useGap = bgs >= 0 && bestC < P[7] + 1e17 * (P[7] == 0);
         if (st == 1 && P[12] == 2) useGap = false;
-        if (st == 1 && P[12] == 3 && bornLab[1] >= 20 && bornLab[0] >= 20 &&
-            diedLab[1] / bornLab[1] - diedLab[0] / bornLab[0] > P[9]) useGap = false;   // прогноз подтвердился: B — к границе роста
+        if (bToFront && P[55] == 0) useGap = false;   // прогноз подтвердился: B — к границе роста
         if (useGap && P[14] == 5 && bestC > P[19]) useGap = false;   // дыра не стоит того — в хвост
         // P15: если лучший промежуток оставляет мёртвый остаток >= P15 — лучше в хвост
         if (bgs >= 0 && bestC >= 1e17) useGap = false;
@@ -436,7 +467,7 @@ struct Alloc {
                 if (r * keep >= (P[34] > 0 ? P[34] * m : P[15])) useGap = false;
             }
         }
-        if (useGap && P[14] == 6 && st < 0) {
+        if (useGap && P[14] == 6 && st < 0 && !endgame) {
             int tl = (int)(T - tailStart());
             if (tl >= L && LW[13] < bestC) useGap = false;   // хвост — только без докопки
         }
@@ -505,6 +536,10 @@ struct Alloc {
     std::vector<char> alive;
     ll remove(int pid) {
         int d = pos[pid], l = len[pid];
+        if (aliveTot > 1) {
+            double q = (double)(aliveTot - bitSum(pid)) / (aliveTot - 1);   // доля живых моложе удаляемой
+            qSum = qSum * P[57] + q; qTot = qTot * P[57] + 1;
+        }
         alive[pid] = 0; bitAdd(pid, -1); deathL[l] += 1; bOnDeath(pid);
         for (int k = 1; k <= MAXL; k++) recDel[k] *= P[31];
         recDelTot = recDelTot * P[31] + 1; recDel[l] += 1; aliveCntL[l]--; aliveTot--;

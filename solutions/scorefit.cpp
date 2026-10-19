@@ -11,13 +11,15 @@
 //      (не ломать дыру ходового размера, оставлять остаток ходового размера), риск соседей по возрасту и др.
 //      Веса подобраны CMA-ES на сгенерированных классах и проверены на независимых наборах
 //      (docs/variants/scorefit.md). Если лучший кандидат дороже LW[13], а в хвосте место есть без докопки — хвост.
-//   3. Остаток в промежутке оставляем рядом с более молодым соседом (он скорее умрёт, и остаток сольётся).
+//   3. Остаток в промежутке оставляем рядом с соседом, который скорее умрёт (и остаток сольётся): обычно с более
+//      молодым, а если по статистике удалений умирают скорее старые (очередь) — с более старым.
 //   4. Потоки. Онлайн ищем признак, носители одного значения которого умирают вместе (каппа совпадения
 //      признака у соседних удалений пачки). Признаки: чётность индекса в серии равных длин, чётность PID,
 //      «индекс в серии mod 3 = k».
 //      Если нашёлся — поток A кладём к левому краю «граничного» промежутка, поток B растёт влево от правой
 //      границы роста F (участками по 400 м). Какая бы половина ни умерла, освобождается сплошной кусок.
-//      Если прогноз «B умирает чаще» подтвердился на помеченных трубах, B идёт сразу к границе роста.
+//      Если подтвердилось, что B вымирает почти целиком, а A — нет (разница долей смертей > 0.9), зона B
+//      отделяется: B — только в дыры между B (иначе к границе роста), A не занимает дыры между двумя B.
 //      В потоках — best fit и штраф «замуровывания» дыры рядом с трубой, чья длина сейчас часто удаляется.
 //   5. В крошечной траншее (< 60 м) — точное попадание, иначе самая большая дыра.
 //
@@ -129,6 +131,8 @@ struct Alloc {
     double birthV[NF][2], deathV[NF][2]; // рождения и смерти по значению признака (с затуханием)
     int curFeat = -1;
     double bornLab[2], diedLab[2];       // проверка прогноза: рождения и смерти среди помеченных A/B
+    // порядок смертей: средняя доля живых, которые моложе удаляемой трубы (0 — умирают свежие, 1 — старые), с затуханием
+    double qSum = 0, qTot = 0;
     int lastDelPid = 0; bool lastWasDel = false;
 
     Alloc() {
@@ -271,6 +275,14 @@ struct Alloc {
         return pv > po ? 1 : 0;           // кто умирает чаще — в поток B
     }
 
+    bool verB = false;                   // зона B отделена (см. place)
+    bool zoneBlocked(int gs, int s, int st) const {
+        if (!verB || st < 0) return false;
+        int lp = pidLeftOf(gs), rp = pidRightOf(gs + s);
+        if (st == 1) return (lp > 0 && stream[lp] != 1) || (rp > 0 && stream[rp] != 1);
+        return lp > 0 && rp > 0 && stream[lp] == 1 && stream[rp] == 1;
+    }
+
     int chooseSide(int gs, int s, int L, int st) {   // где в промежутке gs длины s положить трубу
         int r = s - L;
         if (r == 0) return gs;
@@ -281,7 +293,14 @@ struct Alloc {
             if (rc == st && lc != st) return gs + r;
             return st == 1 ? gs + r : gs;
         }
-        return lp > rp ? gs + r : gs;   // остаток — к более молодому соседу
+        return sideNb(lp, rp) == lp ? gs + r : gs;   // остаток — к соседу, который скорее умрёт
+    }
+    // Сосед, к которому ляжет остаток (вне потоков): обычно умирают свежие — к более молодому (больший PID);
+    // если умирают скорее старые (очередь) — к более старому, но не к краю траншеи (PID 0).
+    bool oldDieFirst() const { return qTot >= 20 && qSum / qTot > 0.5; }
+    int sideNb(int lp, int rp) const {
+        if (oldDieFirst()) { if (lp == 0) return rp; if (rp == 0) return lp; return lp < rp ? lp : rp; }
+        return lp > rp ? lp : rp;
     }
 
     // стоимость укладки трубы L в промежуток gs длины s (меньше — лучше)
@@ -310,7 +329,7 @@ struct Alloc {
         if (st >= 0) return r != 0 ? r : 3 * seal;   // в потоках — best fit
         // вне потоков — линейная оценка (веса LW)
         double hl = hazard(lp), hr = hazard(rp);
-        double hside = lp > rp ? hl : hr;          // остаток ляжет к более молодому соседу
+        double hside = sideNb(lp, rp) == lp ? hl : hr;   // сторона остатка — как в chooseSide
         bool dead = r > 0 && r < m;
         double dr = (r >= 1 && r <= MAXL && cntTot > 0) ? cnt[r] / cntTot : 0;
         double ds = (s <= MAXL && cntTot > 0) ? cnt[s] / cntTot : 0;
@@ -343,25 +362,26 @@ struct Alloc {
         int ts = tailStart();
         double selfHz = recDelTot >= 1 ? rateOfLen(L) : 0;
 
+        // прогноз «B вымирает почти целиком, A — нет» подтвердился на помеченных трубах: зона B отделяется —
+        // B кладём только в дыры между B (иначе к границе роста), A не занимает дыры между двумя живыми B
+        verB = bornLab[1] >= 20 && bornLab[0] >= 20 && diedLab[1] / bornLab[1] - diedLab[0] / bornLab[0] > 0.9;
+
         double bestC = 1e18; int bgs = -1, bs = 0;
         for (int s = L; s < NB; s++) {
             int g = firstGap(s, ts);
             if (g < 0) continue;
-            double c = gapCost(g, s, L, st, m, selfHz);
+            double c = zoneBlocked(g, s, st) ? 1e17 : gapCost(g, s, L, st, m, selfHz);
             if (c < bestC) { bestC = c; bgs = g; bs = s; }
         }
         {
             int bl = 0, g = firstBig(ts, bl);
             if (g >= 0) {
-                double c = gapCost(g, bl, L, st, m, selfHz);
+                double c = zoneBlocked(g, bl, st) ? 1e17 : gapCost(g, bl, L, st, m, selfHz);
                 if (c < bestC) { bestC = c; bgs = g; bs = bl; }
             }
         }
 
         bool useGap = bgs >= 0 && bestC < 1e17;
-        // прогноз «B умирает» подтвердился — B сразу к границе роста
-        if (st == 1 && bornLab[1] >= 20 && bornLab[0] >= 20 &&
-            diedLab[1] / bornLab[1] - diedLab[0] / bornLab[0] > 0.5) useGap = false;
         // вне потоков: если лучший промежуток дороже LW[13], а в хвосте место есть без докопки — в хвост
         if (useGap && st < 0 && T - tailStart() >= L && LW[13] < bestC) useGap = false;
 
@@ -412,6 +432,10 @@ struct Alloc {
     ll remove(int pid) {
         int d = pos[pid], l = len[pid];
         deathL[l] += 1;
+        if (aliveTot > 1) {
+            double q = (double)(aliveTot - bitSum(pid)) / (aliveTot - 1);
+            qSum = qSum * 0.99 + q; qTot = qTot * 0.99 + 1;
+        }
         bitAdd(pid, -1);
         deathAge[ageBucket((int)pos.size() - 1 - pid)] += 1;
         for (int k = 1; k <= MAXL; k++) recDel[k] *= 0.98;
