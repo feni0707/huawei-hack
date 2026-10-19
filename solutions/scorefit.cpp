@@ -18,6 +18,10 @@
 //      «индекс в серии mod 3 = k».
 //      Если нашёлся — поток A кладём к левому краю «граничного» промежутка, поток B растёт влево от правой
 //      границы роста F (участками по 400 м). Какая бы половина ни умерла, освобождается сплошной кусок.
+//      Участки по очереди зеркальны ([A→ ←B][B→ ←A]…): области одного потока соседних участков смежны и при
+//      вымирании сливаются. Недозаполненный участок в конце теста — чистая потеря (≈ C/2), поэтому участок не
+//      больше max(200, 10·L, экономия), где экономия — насколько меньше свободного внутри траншеи у нас, чем у
+//      «тени» без потоков (её копия создаётся при первой возможной метке потока): pairs/periodic +0.5/+0.2 %.
 //      Если подтвердилось, что B вымирает почти целиком, а A — нет (разница долей смертей > 0.9), зона B
 //      отделяется: B — только в дыры между B (иначе к границе роста), A не занимает дыры между двумя B.
 //      В потоках — best fit и штраф «замуровывания» дыры рядом с трубой, чья длина сейчас часто удаляется.
@@ -43,6 +47,8 @@ typedef long long ll;
 static const int NB = 128;     // промежутки короче NB — в корзинах по точной длине, длиннее — в общей куче
 static const int MAXL = 40;    // максимальная длина трубы
 static const int CHUNK = 400;  // участок, который докапывается под поток B, м
+static const int CHUNK_MIN = 200, CHUNK_PER_L = 10;   // нижняя граница участка, пока потоки не доказали экономию
+static const ll SHADOW_MAX_T = 3000000;   // тень удваивает память; в траншее длиннее участок C/2 ничтожен — тень удаляем
 // Зоны по длинам (см. zoneTry): слотов в участке, мин. доля длины среди недавних укладок, макс. число таких длин,
 // макс. доля самой частой длины, мин. число живых труб длины для своего участка.
 static const int ZSLOTS = 16;
@@ -74,6 +80,15 @@ static inline int imax(int a, int b) { return a > b ? a : b; }
 struct Paged {
     static const int SH = 16, MASK = (1 << SH) - 1;
     std::vector<int*> pg;
+    Paged() {}
+    Paged(const Paged& o) {   // глубокая копия (тень аллокатора)
+        for (size_t k = 0; k < o.pg.size(); k++) {
+            int* p = new int[1 << SH];
+            for (int i = 0; i <= MASK; i++) p[i] = o.pg[k][i];
+            pg.push_back(p);
+        }
+    }
+    Paged& operator=(const Paged&) = delete;
     ~Paged() { for (size_t i = 0; i < pg.size(); i++) delete[] pg[i]; }
     void grow(ll n) {
         while ((ll)pg.size() << SH < n) {
@@ -146,6 +161,11 @@ struct Alloc {
 
     // потоки
     int F = 0;                           // правая граница роста потока B; F == T — обычный режим
+    bool flip = false;                   // в текущем участке B растёт слева, A — справа (участки зеркальны)
+    // тень без потоков: та же история команд, своя раскладка (до первой возможной метки совпадает с нами)
+    bool noStreams = false, shadowDropped = false;
+    Alloc* shadow = 0;
+    ll occ = 0;                          // занято метров
     int runIdx = 0, lastL = 0;
     double coSame[NF], coTot[NF];        // соседние удаления в пачке: совпал ли признак (с затуханием)
     double birthV[NF][2], deathV[NF][2]; // рождения и смерти по значению признака (с затуханием)
@@ -177,6 +197,7 @@ struct Alloc {
         }
         ensure(1024);
     }
+    ~Alloc() { delete shadow; }
 
     // ---- промежутки
     void ensure(ll n) { tag.grow(n + 1); owner.grow(n + 1); zl.grow(n + 1); }
@@ -287,6 +308,7 @@ struct Alloc {
     }
     double pdie(int f, int v) const { return (deathV[f][v] + 1) / (birthV[f][v] + 2); }
     int chooseStream(int pid) {
+        if (noStreams) return -1;
         // признак с каппой ≥ 0.6; при нескольких — где сильнее разница p_die; текущий меняем только с запасом
         int bf = -1; double bs = -1, cs = -1;
         for (int f = 0; f < NF; f++) {
@@ -524,8 +546,31 @@ struct Alloc {
         return true;
     }
 
+    // ---- тень без потоков
+    // свободное внутри траншеи, кроме хвоста и граничного промежутка потоков
+    ll freeIn() const {
+        ll f = T - occ - (T - tailStart());
+        if (F < T && F > 0 && tag.get(F) < 0) f -= F - (-tag.get(F) - 1);
+        return f;
+    }
+    void shadowCheck() {
+        if (shadowDropped || noStreams) return;
+        if (shadow) {
+            if (T > SHADOW_MAX_T) { delete shadow; shadow = 0; shadowDropped = true; }
+            return;
+        }
+        bool any = false;
+        for (int f = 0; f < NF; f++) if (kappa(f) >= 0.6) any = true;   // иначе chooseStream точно вернёт -1
+        if (!any) return;
+        shadow = new Alloc(*this);
+        shadow->shadow = 0; shadow->noStreams = true;
+    }
+
     // ---- команды
     void place(int L, ll& outN, ll& outD) {
+        shadowCheck();
+        if (shadow) { ll sn, sd; shadow->place(L, sn, sd); }
+        occ += L;
         int m = minRecent();
         int pid = (int)pos.size();
         if (L == lastL) runIdx++; else runIdx = 0;
@@ -576,30 +621,40 @@ struct Alloc {
             // граничный промежуток — кончается в F (в обычном режиме F == T, это хвост)
             int fgs = (F > 0 && tag.get(F) < 0) ? -tag.get(F) - 1 : F;
             int fl = F - fgs;
+            // участок: не больше доказанной тенью экономии потоков (но не меньше max(200, 10·L))
+            int chunk = CHUNK;
+            if (shadow) {
+                ll c = CHUNK_MIN, sv = shadow->freeIn() - freeIn();
+                if ((ll)CHUNK_PER_L * L > c) c = (ll)CHUNK_PER_L * L;
+                if (sv > c) c = sv;
+                if (c < chunk) chunk = (int)c;
+            }
+            bool far = st >= 0 && ((st == 1) != flip);   // поток растёт от правого края участка (F) влево
             if (fl >= L) {
-                D = st == 1 ? F - L : fgs;
+                D = far ? F - L : fgs;
                 takeFrom(fgs, D, L);
-                if (st == 1) F = D;
+                if (far) F = D;
             } else if (F == T) {
                 int need = L - fl;
-                if (st == 1 && CHUNK - fl > need) need = CHUNK - fl;
+                if (far && chunk - fl > need) need = chunk - fl;
                 N = (need + 19) / 20;
                 dig(N);
-                D = st == 1 ? (int)T - L : fgs;
+                D = far ? (int)T - L : fgs;
                 takeFrom(fgs, D, L);
-                F = st == 1 ? D : (int)T;
+                F = far ? D : (int)T;
             } else {
-                // граничный промежуток исчерпан — новый участок в конце траншеи
+                // граничный промежуток исчерпан — новый участок в конце траншеи, зеркальный предыдущему
+                if (st >= 0) { flip = !flip; far = (st == 1) != flip; }
                 ts = tailStart();
                 int tl = (int)(T - ts);
                 int need = L - tl;
-                if (st >= 0 && CHUNK - tl > need) need = CHUNK - tl;
+                if (st >= 0 && chunk - tl > need) need = chunk - tl;
                 N = need > 0 ? (need + 19) / 20 : 0;
                 dig(N);
                 ts = tailStart();
-                D = st == 1 ? (int)T - L : ts;
+                D = far ? (int)T - L : ts;
                 takeFrom(ts, D, L);
-                F = st == 1 ? D : (int)T;
+                F = far ? D : (int)T;
             }
         }
         finishPlace(pid, L, N, D, outN, outD);
@@ -619,6 +674,8 @@ struct Alloc {
 
     ll remove(int pid) {
         int d = pos[pid], l = len[pid];
+        occ -= l;
+        if (shadow) shadow->remove(pid);
         deathL[l] += 1;
         if (aliveTot > 1) {
             double q = (double)(aliveTot - bitSum(pid)) / (aliveTot - 1);

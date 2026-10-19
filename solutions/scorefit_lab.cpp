@@ -3,6 +3,8 @@
 // Сборка оффлайн-симулятора (без интерактора, для экспериментов):
 //   c++ -std=c++17 -O2 -DSIM -o build/sim_sf solutions/scorefit_lab.cpp
 //   build/sim_sf materials/tests/*.in      (параметры: env SF="i=v i=v ...")
+//   SFCUTS=20 — KPI каждого теста усредняется по 20 концам в последних 10 % (убирает шум «где кончился тест»
+//   относительно открытого участка потоков: на маленьких тестах он ≈ 400/√12 м)
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -36,7 +38,12 @@ typedef long long ll;
 // P56 сторона остатка по порядку смертей (умирают старые — к старшему соседу), P57 затухание этой статистики
 // P92 «гонка соседей» (какой из соседей промежутка с остатком умер первым) вместо P56, если доля дальше P95 от 0.5;
 //      P93 затухание; P92 = 2..5 — статистика по ключам (возраст/длины соседей, P94 мин. наблюдений), не лучше 1
-static double P[96] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.9, 2, 0, 3, 60, 6, 0, 0, 3, 4, 0, 400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 2, 0, 0, 0.3, 0, 0.99, 0.05, 0, 0, 0, 0, 1, 0, 0, 0, 8, 0.999, 1.5, 0, 0, 0, 0, 2, 1, 0.99, 0, 1, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 16, 0.08, 8, 0, 0.25, 150, 0.7, 0.97, 300, 1, 0.7, 1, 0.99, 20, 0.2};
+// P107 участки потоков по очереди зеркальны ([A→ ←B][B→ ←A]…): области одного потока соседних участков смежны;
+// P99 тень без потоков (копия при первой возможной метке): участок ≤ max(P100, P106·L, P101·экономия), экономия =
+//      свободное внутри траншеи у тени минус у основной (без хвоста и граничного промежутка). Отрицательные/выкл.:
+//      P96/P97 участок ~ L, P98 ближний поток не копает участок, P102 участок кратен L, P103–P105 «помеченные не
+//      умирают» → без участка, P108 нижняя граница участка ~ T; P109 — тень удаляется при T > P109 (память ×2)
+static double P[128] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.9, 2, 0, 3, 60, 6, 0, 0, 3, 4, 0, 400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 2, 0, 0, 0.3, 0, 0.99, 0.05, 0, 0, 0, 0, 1, 0, 0, 0, 8, 0.999, 1.5, 0, 0, 0, 0, 2, 1, 0.99, 0, 1, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 16, 0.08, 8, 0, 0.25, 150, 0.7, 0.97, 300, 1, 0.7, 1, 0.99, 20, 0.2, 0, 0, 0, 1, 200, 1, 0, 0, 20, 0.99, 10, 1, 0, 3e6};
 
 // P14=6 (по умолчанию): линейная оценка кандидатов вне потоков, веса LW (env SFW="w0 w1 ..." — переопределить);
 // старое поведение (best fit + правила) — SF="14=0 15=4"
@@ -56,6 +63,8 @@ struct Alloc {
         static const int SH = 16, MASK = (1 << SH) - 1;
         std::vector<int*> pg; int fill;
         explicit Paged(int f) : fill(f) {}
+        Paged(const Paged& o) : fill(o.fill) { for (int* p : o.pg) { int* q = new int[1 << SH]; memcpy(q, p, sizeof(int) << SH); pg.push_back(q); } }
+        Paged& operator=(const Paged&) = delete;
         ~Paged() { for (int* p : pg) delete[] p; }
         void grow(ll n) { while ((ll)pg.size() << SH < n) { int* p = new int[1 << SH]; for (int i = 0; i <= MASK; i++) p[i] = fill; pg.push_back(p); } }
         int& operator[](ll i) { return pg[i >> SH][i & MASK]; }
@@ -174,6 +183,7 @@ struct Alloc {
     // 1 — поток B (к правой границе роста F, растёт влево)
     std::vector<signed char> stream;
     int F = 0;                        // правая граница роста; F == T — обычный режим
+    bool flip = false;                // P107: в текущем участке B растёт слева, A — справа
     double bVol = 0;                  // затухающий объём укладок потока B (для размера участка)
     double fbVol = 0;                 // то же, но только укладки B к границе роста
     std::vector<unsigned char> feat;  // биты признаков при рождении: bit0 — чётность индекса в серии равных длин, bit1 — чётность PID
@@ -262,6 +272,17 @@ struct Alloc {
         return e >= 1 ? 0 : (o - e) / (1 - e);
     }
     double pdie(int f, int v) const { return (deathV[f][v] + 1) / (birthV[f][v] + 2); }
+    // P99: тень без потоков (та же история команд, своя раскладка) — для выключения потоков, если они проигрывают
+    bool noStreams = false, streamsOff = false, shadowDropped = false; Alloc* shadow = nullptr; ll occ = 0;
+    ll freeIn() const {   // свободное внутри траншеи, кроме хвоста и граничного промежутка потоков
+        ll f = T - occ - (T - tailStart());
+        if (F < T && F > 0 && tag[F] < 0) f -= F - (-tag[F] - 1);
+        return f;
+    }
+    void shadowCheck();
+    // P103: доля помеченных (A/B) среди недавних удалений (считаются, пока живы помеченные) против их доли среди живых
+    double delB = 0, delN = 0; int aliveB1 = 0;
+    bool bFalsified() const { return P[103] > 0 && delN >= P[104] && aliveB1 > 0 && delB / delN < P[103] * aliveB1 / std::max(1, aliveTot); }
     int chooseStream(int pid, int L) {
         unsigned char fv = feat[pid];
         if (P[10] == 1 && oracleDeath) {
@@ -269,7 +290,7 @@ struct Alloc {
             int dt = oracleDeath[pid];
             return dt >= 0 && dt - curCmd <= P[11] ? 1 : 0;
         }
-        if (P[10] != 2) return -1;
+        if (P[10] != 2 || noStreams || streamsOff) return -1;
         // признак: каппа «умирают вместе» выше порога; при равенстве — тот, где сильнее разница p_die
         // гистерезис: текущий признак меняем, только если другой лучше с запасом
         int bf = -1; double bs = -1, cs = -1;
@@ -402,6 +423,7 @@ struct Alloc {
         for (int i = 0; i < L; i++) owner[D + i] = pid;
         fbVol = fbVol * P[38] + ((st == 1 && !useGap) ? L : 0);
         bOnBirth(pid);
+        if (st >= 0) aliveB1++;
         pos.push_back(D); len.push_back(L); alive.push_back(1); birthL[L] += 1; aliveCntL[L]++; aliveTot++;
         if (P[61] >= 2) for (int m = 2; m <= (int)P[61]; m++) aliveMod[m][pid % m]++;
         // после расширения rebuildBit уже учёл pid (alive[pid] = 1) — второй bitAdd давал «призрачных» живых
@@ -512,6 +534,9 @@ struct Alloc {
     }
 
     std::pair<ll,ll> place(int L) {
+        if (P[99] > 0 && !noStreams) shadowCheck();   // до первой возможной метки потока тень совпала бы с основной
+        if (shadow) { shadow->curCmd = curCmd; shadow->place(L); }
+        occ += L;
         int m = minRecent();
         if (++uAge >= 64) rebuildU();
         int pid = (int)pos.size();
@@ -735,32 +760,42 @@ struct Alloc {
             if (P[26] > 0) chunk = std::min(chunk, std::max(L, (int)(P[26] * bVol)));
             if (P[35] > 0) chunk = std::min(chunk, std::max(2 * L, (int)(P[35] * T)));   // не больше доли траншеи
             if (P[37] > 0 && st == 1) chunk = std::min(chunk, std::max(L, (int)(P[37] * fbVol)));
+            if (P[96] > 0) chunk = P[97] > 0 ? std::max(2 * L, (int)(P[96] * L)) : std::min(chunk, std::max(2 * L, (int)(P[96] * L)));   // P96: участок ~ длине трубы
+            if (shadow && P[101] > 0) chunk = std::min<ll>(chunk, std::max<ll>(std::max<ll>(std::max<ll>((ll)P[100], (ll)(P[106] * L)), (ll)(P[108] * T)), (ll)(P[101] * (shadow->freeIn() - freeIn()))));   // P99: участок ~ доказанной экономии потоков
+            if (st >= 0 && bFalsified()) chunk = 0;
+#ifdef SIM
+            if (getenv("SFCH") && st >= 0) fprintf(stderr, "chunk t=%d st=%d chunk=%d delB=%.2f delN=%.2f aliveLab=%d aliveTot=%d F=%d T=%lld\n", curCmd, st, chunk, delB, delN, aliveB1, aliveTot, F, T);
+#endif
             if (smallChunk) chunk = std::min(chunk, (int)P[42]);
             if (pseudo) chunk = 0;
+            bool far = st >= 0 && ((st == 1) != flip);   // этот поток растёт от правого края участка (F) влево; P107 — участки по очереди зеркальны
             if (fl >= L) {
-                D = st == 1 ? F - L : fgs;
+                D = far ? F - L : fgs;
                 takeFrom(fgs, D, L);
-                if (st == 1) F = D;
+                if (far) F = D;
             } else if (F == T) {
                 int need = L - fl;
-                if (st == 1) need = std::max(need, chunk - fl);
+                if (far) need = std::max(need, chunk - fl);
                 N = (need + 19) / 20;
                 dig(N);
-                D = st == 1 ? (int)T - L : fgs;
+                D = far ? (int)T - L : fgs;
+                if (far && P[102] > 0) D = fgs + (int)((T - fgs) / L) * L - L;   // P102: участок кратен L — фронты A и B сойдутся без остатка
                 takeFrom(fgs, D, L);
-                F = st == 1 ? D : (int)T;
+                F = far ? D : (int)T;
             } else {
                 // граничный промежуток исчерпан — новый участок в конце траншеи
+                if (P[107] > 0 && st >= 0) { flip = !flip; far = (st == 1) != flip; }
                 ts = tailStart();
                 int tl = (int)(T - ts);
                 int need = L - tl;
-                if (st >= 0) need = std::max(need, chunk - tl);
+                if (st >= 0 && (far || P[98] == 0)) need = std::max(need, chunk - tl);   // P98: ближний поток не копает участок — его копает дальний
                 N = need > 0 ? (need + 19) / 20 : 0;
                 dig(N);
                 ts = tailStart();
-                D = st == 1 ? (int)T - L : ts;
+                D = far ? (int)T - L : ts;
+                if (far && P[102] > 0) D = ts + (int)((T - ts) / L) * L - L;
                 takeFrom(ts, D, L);
-                F = st == 1 ? D : (int)T;
+                F = far ? D : (int)T;
             }
         }
 return finishPlace(pid, L, D, N, st, useGap, bs);
@@ -773,6 +808,10 @@ return finishPlace(pid, L, D, N, st, useGap, bs);
     std::vector<char> alive;
     ll remove(int pid) {
         int d = pos[pid], l = len[pid];
+        occ -= l;
+        if (shadow) shadow->remove(pid);
+        if (aliveB1 > 0) { delB = delB * P[105] + (stream[pid] >= 0); delN = delN * P[105] + 1; }
+        if (stream[pid] >= 0) aliveB1--;
         if (aliveTot > 1) {
             double q = (double)(aliveTot - bitSum(pid)) / (aliveTot - 1);   // доля живых моложе удаляемой
             qSum = qSum * P[57] + q; qTot = qTot * P[57] + 1;
@@ -815,8 +854,24 @@ return finishPlace(pid, L, D, N, st, useGap, bs);
         for (int s = 1; s < NB; s++) for (int g : bucket[s]) if (g != ts) { holes += s; if (s < 8) small += s; }
         for (auto& g : big) if (g.second != ts) holes += g.first;
     }
+    ~Alloc() { delete shadow; }
     Alloc() { pos.push_back(-1); len.push_back(0); feat.push_back(0); stream.push_back(-1); alive.push_back(0); runOf.push_back(-1); ensure(1024); }
 };
+
+void Alloc::shadowCheck() {
+    if (shadowDropped) return;
+    if (shadow && P[109] > 0 && T > P[109]) { delete shadow; shadow = nullptr; shadowDropped = true; return; }   // P109: память; участок C/2 в такой траншее ничтожен
+    if (!shadow) {
+        bool any = false;
+        for (int f = 0; f < NF; f++) if (kappa(f) >= P[22]) any = true;
+        if (!any || P[10] != 2) return;
+        shadow = new Alloc(*this); shadow->shadow = nullptr; shadow->noStreams = true;
+    }
+#ifdef SIM
+    if (getenv("SFSH") && nPlaced % atoi(getenv("SFSH")) == 0)
+        fprintf(stderr, "t=%d T=%lld in=%lld F=%d gap=%lld | sh T=%lld in=%lld | off=%d feat=%d\n", curCmd, T, freeIn(), F, (ll)((F < T && F > 0 && tag[F] < 0) ? F + tag[F] + 1 : 0), shadow->T, shadow->freeIn(), (int)streamsOff, curFeat);
+#endif
+}
 
 #ifdef SIM
 // ---------------------------------------------------------------- оффлайн-симулятор
@@ -847,7 +902,7 @@ int main(int argc, char** argv) {
         char* p = (char*)s;
         while (*p) {
             char* q; long i = strtol(p, &q, 10); if (q == p || *q != '=') break;
-            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 96) P[i] = v; p = q;
+            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 128) P[i] = v; p = q;
         }
     }
     if (const char* s = getenv("SFW")) {
@@ -887,7 +942,9 @@ int main(int argc, char** argv) {
         std::vector<int> lastLen, freedAt;
         ll occ = 0; bool ok = true;
         long long step = getenv("SFTRACE") ? atoll(getenv("SFTRACE")) : 0; long long ci = 0;
+        int ncut = getenv("SFCUTS") ? atoi(getenv("SFCUTS")) : 0; double cutSum = 0; int cutCnt = 0;   // средний KPI по концам в последних 10 %
         for (int c : cmd) {
+            if (ncut > 1 && ci > 0) { long long n = (long long)cmd.size(), lo = n - n / 10; long long st = std::max(1LL, n / 10 / ncut); if (ci >= lo && (ci - lo) % st == 0 && !cells.empty()) { cutSum += (double)occ / cells.size(); cutCnt++; } }
             if (step && ci % step == 0) {
                 // гистограмма дыр
                 long long holes, small; A.holeStats(holes, small);
@@ -955,6 +1012,7 @@ int main(int argc, char** argv) {
             printf("\n");
         }
         double kpi = ok && !cells.empty() ? (double)occ / cells.size() : 0;
+        if (ncut > 1 && ok && !cells.empty()) kpi = (cutSum + kpi) / (cutCnt + 1);
         if (!ok) fprintf(stderr, "WA on %s\n", argv[a]);
         total += kpi * w; wsum += w;
         if (!quiet) printf("%-40s w=%-4g kpi=%.5f T=%zu occ=%lld\n", argv[a], w, kpi, cells.size(), occ);
@@ -993,7 +1051,7 @@ int main() {
         char* p = (char*)s;
         while (*p) {
             char* q; long i = strtol(p, &q, 10); if (q == p || *q != '=') break;
-            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 96) P[i] = v; p = q;
+            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 128) P[i] = v; p = q;
         }
     }
     if (const char* s = getenv("SFW")) {
