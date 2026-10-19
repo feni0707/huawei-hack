@@ -52,6 +52,7 @@ static const int MAXL = 40;    // максимальная длина трубы
 static const int CHUNK = 400, CHUNK_SAME = 800;   // участок под поток B, м (CHUNK_SAME — при группах одного размера)
 static const int CHUNK_MIN = 200, CHUNK_PER_L = 10;   // нижняя граница участка, пока потоки не доказали экономию
 static const int CHUNK_LOW = 40, CHUNK_LOW_AGE = 1000;   // нижняя граница, если тень долго не видит экономии
+static const int EARLY_RUN = 64, EARLY_MAXL = 3;   // потоки по чётности до первых удалений (см. chooseStream)
 static const int FIT_EXTRA = 4, FIT_RUN = 30;   // подгонка участка под длину серии (см. fitChunk)
 static const ll SHADOW_MAX_T = 3000000;   // тень удваивает память; в траншее длиннее участок C/2 ничтожен — тень удаляем
 // Зоны по длинам (см. zoneTry): слотов в участке, мин. доля длины среди недавних укладок, макс. число таких длин,
@@ -343,8 +344,13 @@ struct Alloc {
         return e >= 1 ? 0 : (o - e) / (1 - e);
     }
     double pdie(int f, int v) const { return (deathV[f][v] + 1) / (birthV[f][v] + 2); }
+    bool anyDel = false;                 // в тесте уже было удаление
     int chooseStream(int pid) {
         if (noStreams) return -1;
+        // До первых удалений длинная серия коротких равных длин (как первая группа 9: 1000 труб длины 1, потом
+        // удаляется каждая вторая) — сразу двумя потоками по чётности индекса: какая бы половина ни умерла,
+        // освободится сплошной кусок (иначе — 500 мёртвых дыр по 1 м). sorted_groups +0.2…0.4 %, 9 +0.5 %.
+        if (!anyDel && runIdx >= EARLY_RUN && lastL <= EARLY_MAXL) return runIdx & 1;
         // признак с каппой ≥ 0.6; при нескольких — где сильнее разница p_die; текущий меняем только с запасом
         int bf = -1; double bs = -1, cs = -1;
         for (int f = 0; f < NF; f++) {
@@ -756,6 +762,7 @@ struct Alloc {
     }
 
     ll remove(int pid) {
+        anyDel = true;
         int d = pos[pid], l = len[pid];
         occ -= l;
         if (shadow) shadow->remove(pid);
