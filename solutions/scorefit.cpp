@@ -192,6 +192,7 @@ struct Alloc {
     Alloc* shadow = 0; ll shadowBorn = 0;
     ll occ = 0;                          // занято метров
     int runIdx = 0, lastL = 0;
+    int runPrev = 0, runLast = 0;        // длины двух последних серий равных длин (≥ FIT_RUN)
     double coSame[NF], coTot[NF];        // соседние удаления в пачке: совпал ли признак (с затуханием)
     double birthV[NF][2], deathV[NF][2]; // рождения и смерти по значению признака (с затуханием)
     int curFeat = -1;
@@ -624,7 +625,11 @@ struct Alloc {
         occ += L;
         int m = minRecent();
         int pid = (int)pos.size();
-        if (L == lastL) runIdx++; else runIdx = 0;
+        if (L == lastL) runIdx++;
+        else {
+            if (runIdx + 1 >= FIT_RUN) { runPrev = runLast; runLast = runIdx + 1; }
+            runIdx = 0;
+        }
         lastL = L;
         feat.push_back((unsigned char)((runIdx & 1) | ((pid & 1) << 1) | (1 << (2 + runIdx % 3))));
         int st = chooseStream(pid);
@@ -682,6 +687,13 @@ struct Alloc {
                 if ((ll)pos.size() - shadowBorn > CHUNK_LOW_AGE && sv < c && CHUNK_LOW + L < c) c = CHUNK_LOW + L;
                 if (sv > c) c = sv;
                 if (c < chunk) chunk = (int)c;
+                // группы одинакового размера (две последние серии отличаются ≤ 2 %, как в 5/9): участок не больше,
+                // чем осталось до конца текущей группы (но ≥ 4·L) — последний участок в конце теста не пустует
+                if (runPrev > 0 && runIdx >= FIT_RUN && 50 * dabs(runPrev - runLast) <= imax(runPrev, runLast)) {
+                    ll rem = (ll)(runLast - runIdx) * L;
+                    if (rem < 4 * L) rem = 4 * L;
+                    if (rem < chunk) chunk = (int)rem;
+                }
             }
             bool far = st >= 0 && ((st == 1) != flip);   // поток растёт от правого края участка (F) влево
             if (fl >= L) {
