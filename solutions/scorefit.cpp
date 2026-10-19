@@ -62,6 +62,7 @@ static const double ZMAXSHARE = 0.25;
 static const int ZMINALIVE = 150;
 static const double ZFAST = 0.7;     // смена режима: доля длин с зонами среди недавних укладок (затухание 0.97) ниже — выкл.
 static const double EXWARM = 300;  // признак LW25 — только после прогрева статистики длин (cntTot)
+static const double SHIFT_TV = 0.7; static const int SHIFT_GAP = 500;   // сброс долей длин для признаков остатка
 static const int MSEEN = 1000;     // окно (укладок) для минимальной ожидаемой длины, см. minRecent
 static const double ZLIFO = 0.7;     // зоны — только если удаления «по стеку длины»: удаляемая среди 8 последних той же длины
 
@@ -161,6 +162,7 @@ struct Alloc {
     // статистика длин укладок (с затуханием) — для «минимальной ожидаемой длины»
     double cnt[MAXL + 1], cntTot = 0;
     int lastSeen[MAXL + 1];              // PID последней трубы каждой длины (0 — не было)
+    double cntR[MAXL + 1]; int lastShift = 0;   // доли длин для признаков остатка (см. finishPlace)
     // доля смертей по длине за всё время (для крошечной траншеи)
     double birthL[MAXL + 1], deathL[MAXL + 1];
     // текущая интенсивность смертей по длине: недавние удаления (с затуханием) и число живых
@@ -191,7 +193,7 @@ struct Alloc {
     Alloc() {
         pos.push_back(-1); len.push_back(0); feat.push_back(0); stream.push_back(-1); alive.push_back(0);
         for (int l = 0; l <= MAXL; l++) {
-            cnt[l] = cntF[l] = birthL[l] = deathL[l] = recDel[l] = 0; aliveCntL[l] = 0; lastPtr[l] = 0; lastSeen[l] = 0;
+            cnt[l] = cntF[l] = birthL[l] = deathL[l] = recDel[l] = 0; aliveCntL[l] = 0; lastPtr[l] = 0; lastSeen[l] = 0; cntR[l] = 0;
             for (int k = 0; k < 8; k++) lastOfLen[l][k] = 0;
         }
         bornLab[0] = bornLab[1] = diedLab[0] = diedLab[1] = 0;
@@ -408,7 +410,8 @@ struct Alloc {
             for (int k = 0; k < 2; k++) {
                 if (nb[k] <= 0) continue;
                 int mg = s + len[nb[k]];
-                if (mg > MAXL || cnt[mg] < 0.05 * cntTot) continue;
+                // слитая дыра — частая длина среди недавних укладок (или среди последних ~30: новый режим)
+                if (mg > MAXL || (cnt[mg] < 0.05 * cntTot && cntF[mg] < 0.2 * cntFTot)) continue;
                 h = dmax(h, hzRate(nb[k]));
             }
             h -= selfHz;
@@ -419,8 +422,8 @@ struct Alloc {
         double hl = hazard(lp), hr = hazard(rp);
         double hside = sideNb(lp, rp) == lp ? hl : hr;   // сторона остатка — как в chooseSide
         bool dead = r > 0 && r < m;
-        double dr = (r >= 1 && r <= MAXL && cntTot > 0) ? cnt[r] / cntTot : 0;
-        double ds = (s <= MAXL && cntTot > 0) ? cnt[s] / cntTot : 0;
+        double dr = (r >= 1 && r <= MAXL && cntTot > 0) ? cntR[r] / cntTot : 0;
+        double ds = (s <= MAXL && cntTot > 0) ? cntR[s] / cntTot : 0;
         double ns = s < NB ? gapCnt[s] : 0, nr = r < NB ? gapCnt[r] : 0;
         double c = LW[0] * r + LW[1] * (r == 0) + LW[2] * dead + LW[3] * (dead ? r : 0) + LW[4] * (r >= m)
                  + LW[5] * dr + LW[6] * ds + LW[7] * (r > 0 ? hside : 0) + LW[8] * (dead ? r * (1 - dmax(hl, hr)) : 0)
@@ -693,6 +696,15 @@ struct Alloc {
         for (int l = 1; l <= MAXL; l++) { cnt[l] *= 0.999; cntF[l] *= 0.97; }
         cntTot = cntTot * 0.999 + 1; cnt[L] += 1;
         cntFTot = cntFTot * 0.97 + 1; cntF[L] += 1;
+        // доли длин для признаков остатка: как cnt, но при резкой смене распределения (полусумма |разниц| с быстрой
+        // статистикой > SHIFT_TV) сбрасываются на быструю (не чаще раза в SHIFT_GAP укладок): lifo_mix +0.05 %
+        for (int l = 1; l <= MAXL; l++) cntR[l] *= 0.999;
+        cntR[L] += 1;
+        if (cntFTot >= 25 && pid - lastShift > SHIFT_GAP) {
+            double tv = 0;
+            for (int l = 1; l <= MAXL; l++) tv += dabs(cntF[l] / cntFTot - cntR[l] / cntTot);
+            if (tv / 2 > SHIFT_TV) { for (int l = 1; l <= MAXL; l++) cntR[l] = cntF[l] / cntFTot * cntTot; lastShift = pid; }
+        }
         lastWasDel = false;
         outN = N; outD = D;
     }
