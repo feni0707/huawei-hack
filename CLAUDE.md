@@ -56,6 +56,10 @@ python3 scripts/bench.py build/bin/foo -j 1             # точный CPU (па
   WA/TL = KPI 0 и подсвечиваются с причиной от интерактора; TL — CPU > 5 с или wall > `--timeout`.
   Код возврата 1 при любом WA/TL. Сырые результаты — `build/bench/last.csv`.
 
+Быстрый стенд без интерактора (1700 тестов за секунды, для экспериментов; посылку всё равно проверять `bench.py`):
+`scripts/simc.cpp` (решение подключается `#include`, ручки `K` через env) + `scripts/simcmp.py` (парное сравнение по
+классам). Описание ключей — в шапках файлов.
+
 `scripts/build_interactor.sh` собирает `materials/interactor.cpp` в `build/interactor` (вызывается автоматически;
 готовый `materials/interactor` — Linux ELF, на macOS не работает).
 
