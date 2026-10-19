@@ -52,7 +52,7 @@ static const int MAXL = 40;    // максимальная длина трубы
 static const int CHUNK = 400, CHUNK_SAME = 800;   // участок под поток B, м (CHUNK_SAME — при группах одного размера)
 static const int CHUNK_MIN = 200, CHUNK_PER_L = 10;   // нижняя граница участка, пока потоки не доказали экономию
 static const int CHUNK_LOW = 40, CHUNK_LOW_AGE = 1000;   // нижняя граница, если тень долго не видит экономии
-static const int EARLY_RUN = 64, EARLY_MAXL = 3;   // потоки по чётности до первых удалений (см. chooseStream)
+static const int EARLY_RUN = 64, EARLY_MAXL = 3, EARLY_CHUNK = 40;   // потоки по чётности до первых удалений (см. chooseStream)
 static const int FIT_EXTRA = 4, FIT_RUN = 30;   // подгонка участка под длину серии (см. fitChunk)
 static const ll SHADOW_MAX_T = 3000000;   // тень удваивает память; в траншее длиннее участок C/2 ничтожен — тень удаляем
 // Зоны по длинам (см. zoneTry): слотов в участке, мин. доля длины среди недавних укладок, макс. число таких длин,
@@ -693,6 +693,9 @@ struct Alloc {
             // больше (CHUNK_SAME), но не больше, чем осталось до конца текущей группы (ниже)
             bool sameGroups = runPrev > 0 && runIdx >= FIT_RUN && 50 * dabs(runPrev - runLast) <= imax(runPrev, runLast);
             if (sameGroups) chunk = CHUNK_SAME;
+            // до первых удалений (ранние потоки, см. chooseStream) — маленький участок: если удалений так и не будет
+            // (14: 15 000 единиц подряд), пустая середина участка — не больше EARLY_CHUNK
+            if (!anyDel) chunk = EARLY_CHUNK;
             if (shadow) {
                 ll c = CHUNK_MIN, sv = shadow->freeIn() - freeIn();
                 if ((ll)CHUNK_PER_L * L > c) c = (ll)CHUNK_PER_L * L;
