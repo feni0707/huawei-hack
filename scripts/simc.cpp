@@ -33,24 +33,27 @@ int main(int argc, char** argv) {
 #ifdef LWMUT
     if (const char* s = getenv("SFW")) { char* p = (char*)s; int i = 0; while (*p && i < 27) { char* q; double v = strtod(p, &q); if (q == p) break; LW[i++] = v; p = q; while (*p == ',' || *p == ' ') p++; } }
 #endif
+    const char* dumpAt = getenv("DUMPAT"); long long dumpCi = dumpAt ? atoll(dumpAt) : -1; bool digs = getenv("DIGS") != nullptr;
     int ncut = getenv("SFCUTS") ? atoi(getenv("SFCUTS")) : 0;
     for (int a = 1; a < argc; a++) {
         double w; std::vector<int> cmd = readTest(argv[a], w);
         Alloc* A = new Alloc();
         ORD.assign(1, 0); { for (size_t i = 0; i < cmd.size(); i++) { if (cmd[i] > 0) ORD.push_back(1 << 30); else if (cmd[i] < 0) ORD[-cmd[i]] = (int)i; } }
         std::vector<int> cells; std::vector<int> plen(1, 0); std::vector<char> ever; std::vector<int> freedAt; std::vector<int> lastl;
+        unsigned long long hsh = 1469598103934665603ULL;   // FNV-хеш всех ответов (сверка «ответы не изменились»)
         ll occ = 0; bool ok = true; double cutSum = 0; int cutCnt = 0;
         long long n = cmd.size();
         for (long long ci = 0; ci < n && ok; ci++) {
             int c = cmd[ci]; CUR = ci;
             if (c == 0) break;
-            if (getenv("DUMPAT") && ci == atoll(getenv("DUMPAT"))) { FILE* f = fopen(getenv("DUMPF"), "w"); for (size_t i = 0; i < cells.size(); i++) fprintf(f, "%d\n", cells[i]); fclose(f); }
+            if (ci == dumpCi) { FILE* f = fopen(getenv("DUMPF"), "w"); for (size_t i = 0; i < cells.size(); i++) fprintf(f, "%d\n", cells[i]); fclose(f); }
             if (ncut > 1 && ci > 0) { long long lo = n - n / 10, st = std::max(1LL, n / 10 / ncut); if (ci >= lo && (ci - lo) % st == 0 && !cells.empty()) { cutSum += (double)occ / cells.size(); cutCnt++; } }
             if (c > 0) {
                 ll N, D; A->place(c, N, D);
+                hsh = (hsh ^ (unsigned long long)(N * 1000003 + D)) * 1099511628211ULL;
                 ll T = (ll)cells.size() + 20 * N;
-                if (getenv("DIGS") && N > 0) printf("dig ci=%lld L=%d N=%lld T=%lld occ=%lld free=%lld\n", ci, c, N, T, occ, (ll)cells.size() - occ);
-                if (getenv("DIGS") && N > 0) { size_t i = 0; printf("   holes:"); while (i < cells.size()) { if (cells[i]) { i++; continue; } size_t j = i; while (j < cells.size() && !cells[j]) j++; printf(" %zu%s", j - i, j == cells.size() ? "T" : ""); i = j; } printf("\n"); }
+                if (digs && N > 0) printf("dig ci=%lld L=%d N=%lld T=%lld occ=%lld free=%lld\n", ci, c, N, T, occ, (ll)cells.size() - occ);
+                if (digs && N > 0) { size_t i = 0; printf("   holes:"); while (i < cells.size()) { if (cells[i]) { i++; continue; } size_t j = i; while (j < cells.size() && !cells[j]) j++; printf(" %zu%s", j - i, j == cells.size() ? "T" : ""); i = j; } printf("\n"); }
                 if (N < 0 || T != A->T || D < 0 || D + c > T || T > 100000000) { ok = false; break; }
                 cells.resize(T, 0); freedAt.resize(T, -1); ever.resize(T, 0); lastl.resize(T, 0);
                 int pid = (int)plen.size(); plen.push_back(c);
@@ -58,6 +61,7 @@ int main(int argc, char** argv) {
                 occ += c;
             } else {
                 int pid = -c; ll d = A->remove(pid);
+                hsh = (hsh ^ (unsigned long long)d) * 1099511628211ULL;
                 if (d < 0 || d >= (ll)cells.size() || cells[d] != pid) { ok = false; break; }
                 for (int i = 0; i < plen[pid]; i++) cells[d + i] = 0, freedAt[d + i] = (int)ci;
                 occ -= plen[pid];
@@ -84,7 +88,7 @@ int main(int argc, char** argv) {
             printf("\n");
             if (getenv("NEVSEG")) { size_t i = 0; printf("NEV:"); while (i < e) { if (cells[i] || ever[i]) { i++; continue; } size_t j = i; while (j < e && !cells[j] && !ever[j]) j++; printf(" %zu+%zu", i, j - i); i = j; } printf(" T=%zu\n", cells.size()); }
         }
-        printf("%s w=%g kpi=%.6f T=%zu%s\n", argv[a], w, kpi, cells.size(), ok ? "" : " WA");
+        printf("%s w=%g kpi=%.6f T=%zu h=%016llx%s\n", argv[a], w, kpi, cells.size(), hsh, ok ? "" : " WA");
         fflush(stdout);
         delete A;
     }

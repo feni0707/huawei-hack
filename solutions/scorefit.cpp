@@ -88,25 +88,39 @@ static inline int imax(int a, int b) { return a > b ? a : b; }
 struct Paged {
     static const int SH = 16, MASK = (1 << SH) - 1;
     std::vector<int*> pg;
-    Paged() {}
-    Paged(const Paged& o) {   // глубокая копия (тень аллокатора)
+    std::vector<int> nz;                 // ленивый режим: число ненулевых значений на странице
+    // Ленивый режим: страница создаётся при первой ненулевой записи и освобождается, когда снова вся нулевая
+    // (у tag ненулевые только концы промежутков, у zl — участки зон): плотно занятая траншея их не держит.
+    bool lazy;
+    explicit Paged(bool lz = false) : lazy(lz) {}
+    Paged(const Paged& o) : nz(o.nz), lazy(o.lazy) {   // глубокая копия (тень аллокатора)
         for (size_t k = 0; k < o.pg.size(); k++) {
-            int* p = new int[1 << SH];
-            for (int i = 0; i <= MASK; i++) p[i] = o.pg[k][i];
+            int* p = 0;
+            if (o.pg[k]) { p = new int[1 << SH]; for (int i = 0; i <= MASK; i++) p[i] = o.pg[k][i]; }
             pg.push_back(p);
         }
     }
     Paged& operator=(const Paged&) = delete;
-    ~Paged() { for (size_t i = 0; i < pg.size(); i++) delete[] pg[i]; }
-    void grow(ll n) {
-        while ((ll)pg.size() << SH < n) {
-            int* p = new int[1 << SH];
-            for (int i = 0; i <= MASK; i++) p[i] = 0;
-            pg.push_back(p);
-        }
+    ~Paged() { for (size_t i = 0; i < pg.size(); i++) delete[] pg[i]; for (size_t i = 0; i < spare.size(); i++) delete[] spare[i]; }
+    std::vector<int*> spare;             // освобождённые страницы (уже нулевые) — без повторного обнуления
+    int* newPage() {
+        if (!spare.empty()) { int* p = spare.back(); spare.pop_back(); return p; }
+        int* p = new int[1 << SH]; for (int i = 0; i <= MASK; i++) p[i] = 0; return p;
     }
-    int get(ll i) const { return pg[i >> SH][i & MASK]; }
-    void set(ll i, int v) { pg[i >> SH][i & MASK] = v; }
+    void grow(ll n) {
+        while ((ll)pg.size() << SH < n) { pg.push_back(lazy ? 0 : newPage()); if (lazy) nz.push_back(0); }
+    }
+    int get(ll i) const { const int* p = pg[i >> SH]; return p ? p[i & MASK] : 0; }
+    void set(ll i, int v) {
+        size_t k = (size_t)(i >> SH);
+        int*& p = pg[k];
+        if (!lazy) { p[i & MASK] = v; return; }
+        if (!p) { if (v == 0) return; p = newPage(); }
+        int& c = p[i & MASK];
+        nz[k] += (v != 0) - (c != 0);
+        c = v;
+        if (nz[k] == 0) { if (spare.size() < 4) spare.push_back(p); else delete[] p; p = 0; }
+    }
 };
 
 // ---------------------------------------------------------------- двоичная куча (минимум) на массиве
@@ -145,7 +159,7 @@ struct Alloc {
     // tag[x] > 0 — в x начинается свободный промежуток длины tag[x]; tag[x] < 0 — в x кончается промежуток,
     // начавшийся в -tag[x]-1; 0 — ни то ни другое (соседние промежутки всегда склеены). owner[x] — PID трубы
     // в клетке x (в свободных клетках — устаревшее значение, туда не смотрим).
-    Paged tag, owner, zl;               // zl[x] — длина-владелец зарезервированного участка (зоны), 0 — нет
+    Paged tag{true}, owner, zl{true};               // zl[x] — длина-владелец зарезервированного участка (зоны), 0 — нет
     // Корзины: bucket[s] — начала промежутков длины s (куча по адресу); big — ключ len·2^32 + start.
     // Удаление ленивое: элемент действителен, только если tag[start] всё ещё равен его длине.
     Heap bucket[NB], big;
@@ -191,6 +205,7 @@ struct Alloc {
     int lastDelPid = 0; bool lastWasDel = false;
 
     Alloc() {
+        if (logN[1] == 0) initLogs();
         pos.push_back(-1); len.push_back(0); feat.push_back(0); stream.push_back(-1); alive.push_back(0);
         for (int l = 0; l <= MAXL; l++) {
             cnt[l] = cntF[l] = birthL[l] = deathL[l] = recDel[l] = 0; aliveCntL[l] = 0; lastPtr[l] = 0; lastSeen[l] = 0; cntR[l] = 0;
@@ -198,7 +213,7 @@ struct Alloc {
         }
         bornLab[0] = bornLab[1] = diedLab[0] = diedLab[1] = 0;
         for (int i = 0; i < NB; i++) gapCnt[i] = 0;
-        for (int i = 0; i < 24; i++) deathAge[i] = 0;
+        for (int i = 0; i < 24; i++) deathAge[i] = deathSuf[i] = 0;
         aliveBit.assign(BITN, 0);
         raceHead.assign(1024, -1);
         for (int f = 0; f < NF; f++) {
@@ -243,14 +258,15 @@ struct Alloc {
     // Первый действительный промежуток длины s (по адресу), кроме хвоста ts и граничного (кончается в F).
     // -1 — нет. Устаревшие элементы и дубликаты выбрасываются.
     int firstGap(int s, int ts) {
+        if (gapCnt[s] == 0) return -1;   // счётчик точный: действительных промежутков нет
         Heap& h = bucket[s];
         int keep[3], nk = 0, res = -1;
         while (!h.empty() && nk < 3) {
             int g = (int)h.top();
             if (tag.get(g) != s || (nk > 0 && keep[nk - 1] == g)) { h.pop(); continue; }
+            if (g != ts && g + s != F) { res = g; break; }   // найденный остаётся в куче
             h.pop();
             keep[nk++] = g;
-            if (g != ts && g + s != F) { res = g; break; }
         }
         for (int i = 0; i < nk; i++) h.push(keep[i]);
         return res;
@@ -297,7 +313,7 @@ struct Alloc {
     // deathAge[b] — смерти в возрасте [2^b - 1, 2^(b+1) - 1), живые с возрастом ≥ 2^b - 1 — из дерева Фенвика по PID.
     static const int BITN = 1 << 18;     // > 200 000 укладок
     std::vector<int> aliveBit;
-    double deathAge[24];
+    double deathAge[24], deathSuf[24];   // deathSuf[b] — сумма deathAge[b..23] (целые, сумма точная)
     void bitAdd(int i, int v) { for (; i < BITN; i += i & -i) aliveBit[i] += v; }
     int bitSum(int i) const { int r = 0; for (; i > 0; i -= i & -i) r += aliveBit[i]; return r; }
     static int ageBucket(int a) { int b = 0; while ((2 << b) - 1 <= a && b < 23) b++; return b; }
@@ -305,8 +321,7 @@ struct Alloc {
         if (p <= 0) return 0;
         int cur = (int)pos.size() - 1;
         int b = ageBucket(cur - p);
-        double dGE = 0;
-        for (int k = b; k < 24; k++) dGE += deathAge[k];
+        double dGE = deathSuf[b];
         int lo = cur - ((1 << b) - 1);
         double aGE = lo > 0 ? bitSum(lo) : 0;
         return dGE + aGE > 0 ? dGE / (dGE + aGE) : 0.5;
@@ -393,6 +408,14 @@ struct Alloc {
         return lp > rp ? lp : rp;
     }
 
+    // таблицы логарифмов (те же значения, что std::log, без вызова в горячем цикле)
+    static const int LOGN = 4096;
+    static double logN[LOGN], logSL[NB][MAXL + 1];
+    static void initLogs() {
+        for (int n = 0; n < LOGN; n++) logN[n] = std::log(1.0 + n);
+        for (int s = 0; s < NB; s++) for (int l = 1; l <= MAXL; l++) logSL[s][l] = s > 0 ? std::log((double)s / l) : 0;
+    }
+    static double log1n(int n) { return n < LOGN ? logN[n] : std::log(1.0 + n); }
     // стоимость укладки трубы L в промежуток gs длины s (меньше — лучше)
     double gapCost(int gs, int s, int L, int st, int m, double selfHz) const {
         if (T < 60) {   // крошечная траншея
@@ -427,8 +450,8 @@ struct Alloc {
         double ns = s < NB ? gapCnt[s] : 0, nr = r < NB ? gapCnt[r] : 0;
         double c = LW[0] * r + LW[1] * (r == 0) + LW[2] * dead + LW[3] * (dead ? r : 0) + LW[4] * (r >= m)
                  + LW[5] * dr + LW[6] * ds + LW[7] * (r > 0 ? hside : 0) + LW[8] * (dead ? r * (1 - dmax(hl, hr)) : 0)
-                 + LW[9] * (r == 0 ? dmax(hzRate(lp), hzRate(rp)) : 0) + LW[10] * std::log(1.0 + ns)
-                 + LW[11] * std::log((double)s / L) + LW[12] * (dead && r >= 4) + LW[15] * (r == 0 ? dmin(hl, hr) : 0)
+                 + LW[9] * (r == 0 ? dmax(hzRate(lp), hzRate(rp)) : 0) + LW[10] * log1n((int)ns)
+                 + LW[11] * (s < NB ? logSL[s][L] : std::log((double)s / L)) + LW[12] * (dead && r >= 4) + LW[15] * (r == 0 ? dmin(hl, hr) : 0)
                  + LW[16] * (r > 0 && r < 2 * m && !dead);
         if (r > 0) c += LW[18] * ds / (1.0 + ns) + LW[19] * dr / (1.0 + nr);
         if (r > 0 && cntTot >= EXWARM) {   // изменение избытка дыр над ожидаемым спросом: появится дыра r, исчезнет дыра s
@@ -693,12 +716,11 @@ struct Alloc {
         bitAdd(pid, 1);
         birthL[L] += 1; aliveCntL[L]++; aliveTot++;
         lastOfLen[L][lastPtr[L]] = pid; lastPtr[L] = (lastPtr[L] + 1) & 7; lastSeen[L] = pid;
-        for (int l = 1; l <= MAXL; l++) { cnt[l] *= 0.999; cntF[l] *= 0.97; }
+        for (int l = 1; l <= MAXL; l++) { cnt[l] *= 0.999; cntF[l] *= 0.97; cntR[l] *= 0.999; }
         cntTot = cntTot * 0.999 + 1; cnt[L] += 1;
         cntFTot = cntFTot * 0.97 + 1; cntF[L] += 1;
         // доли длин для признаков остатка: как cnt, но при резкой смене распределения (полусумма |разниц| с быстрой
         // статистикой > SHIFT_TV) сбрасываются на быструю (не чаще раза в SHIFT_GAP укладок): lifo_mix +0.05 %
-        for (int l = 1; l <= MAXL; l++) cntR[l] *= 0.999;
         cntR[L] += 1;
         if (cntFTot >= 25 && pid - lastShift > SHIFT_GAP) {
             double tv = 0;
@@ -720,7 +742,7 @@ struct Alloc {
         }
         bitAdd(pid, -1); alive[pid] = 0;
         raceOnDeath(pid);
-        deathAge[ageBucket((int)pos.size() - 1 - pid)] += 1;
+        { int b = ageBucket((int)pos.size() - 1 - pid); deathAge[b] += 1; for (int k = 0; k <= b; k++) deathSuf[k] += 1; }
         for (int k = 1; k <= MAXL; k++) recDel[k] *= 0.98;
         recDelTot = recDelTot * 0.98 + 1; recDel[l] += 1; aliveCntL[l]--; aliveTot--;
         bool hit = false;
@@ -742,6 +764,8 @@ struct Alloc {
         return d;
     }
 };
+
+double Alloc::logN[Alloc::LOGN], Alloc::logSL[NB][MAXL + 1];
 
 // ---------------------------------------------------------------- ввод-вывод
 // Читаем через read(): он возвращает то, что уже пришло, и не ждёт заполнения буфера (интерактив).
