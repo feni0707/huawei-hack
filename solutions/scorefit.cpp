@@ -22,6 +22,13 @@
 //      отделяется: B — только в дыры между B (иначе к границе роста), A не занимает дыры между двумя B.
 //      В потоках — best fit и штраф «замуровывания» дыры рядом с трубой, чья длина сейчас часто удаляется.
 //   5. В крошечной траншее (< 60 м) — точное попадание, иначе самая большая дыра.
+//   6. Зоны по длинам (zoneTry). Генератор открытых тестов удаляет почти всегда одну из последних труб ТОЙ ЖЕ
+//      длины, а старые короткие во 2-й фазе 15 — «ходоком» вниз по стеку длины. Пока 4–8 длин примерно одинаково
+//      часты, у каждой ≥ 150 живых и удаления действительно идут «по стеку длины», трубы частой длины кладутся
+//      в свои участки по порядку (стек свободных слотов): умершие подряд сливаются в сплошные куски для длинных.
+//      15: 0.953 → 0.961. Редкие длины в это время — «точно / остаток ≥ m самого редкого размера / хвост».
+//   7. Признак LW25: изменение избытка дыр над ожидаемым спросом (держать разнообразие размеров дыр, чтобы
+//      следующие трубы находили точные дыры).
 //
 // Код написан с оглядкой на перенос на Cangjie: без std::set/map/priority_queue и лямбд — кучи и
 // постраничные массивы сделаны вручную, все структуры — массивы.
@@ -35,6 +42,16 @@ typedef long long ll;
 static const int NB = 128;     // промежутки короче NB — в корзинах по точной длине, длиннее — в общей куче
 static const int MAXL = 40;    // максимальная длина трубы
 static const int CHUNK = 400;  // участок, который докапывается под поток B, м
+// Зоны по длинам (см. zoneTry): слотов в участке, мин. доля длины среди недавних укладок, макс. число таких длин,
+// макс. доля самой частой длины, мин. число живых труб длины для своего участка.
+static const int ZSLOTS = 16;
+static const double ZSHARE = 0.08;
+static const int ZMAXACT = 8;
+static const double ZMAXSHARE = 0.25;
+static const int ZMINALIVE = 150;
+static const double ZFAST = 0.7;     // смена режима: доля длин с зонами среди недавних укладок (затухание 0.97) ниже — выкл.
+static const double EXWARM = 300;
+static const double ZLIFO = 0.7;     // зоны — только если удаления «по стеку длины»: удаляемая среди 8 последних той же длины    // признак LW25 — только после прогрева статистики длин (cntTot)
 
 // Веса линейной оценки кандидата (вне потоков). Подобраны CMA-ES на сгенерированных классах (two_phase,
 // alternating, lifo_mix, phases, sorted_groups, periodic; scripts/cmaes_weights.py) и проверены на независимых наборах.
@@ -42,8 +59,9 @@ static const int CHUNK = 400;  // участок, который докапыв�
 // 5 доля длины r среди недавних укладок, 6 то же для длины s, 7 риск соседа со стороны остатка, 8 r·[мёртвый]·
 // P(оба соседа выживут), 9 точное попадание: max интенсивность смертей соседей, 10 log(1+число дыр длины s),
 // 11 log(s/L), 12 мёртвый остаток ≥ 4, 13 цена хвоста без докопки, 15 точное: min риск соседей,
-// 16 живой остаток < 2m, 17 штраф «замуровывания», 18/19 дефицит размера s / r.
-static const double LW[20] = {1, -38.8, -22.4, 13.5, 47, -203, 107, -7.25, 2.78, 2.26, -8.96, 23.4, 1.05e+03, 69, 0, 46.7, 27.9, 8.7, 0, 0};
+// 16 живой остаток < 2m, 17 штраф «замуровывания», 18/19 дефицит размера s / r, 25 изменение избытка дыр над
+// ожидаемым спросом за LW[26] укладок (+r, −s). 20–24 не используются (24 «хвост с докопкой» ломал del_half_group).
+static const double LW[27] = {1, -38.8, -22.4, 13.5, 47, -203, 107, -7.25, 2.78, 2.26, -8.96, 23.4, 1.05e+03, 69, 0, 46.7, 27.9, 8.7, 0, 0, 0, 0, 0, 0, 0, 20, 50};
 
 static inline double dmax(double a, double b) { return a > b ? a : b; }
 static inline double dmin(double a, double b) { return a < b ? a : b; }
@@ -103,13 +121,14 @@ struct Alloc {
     // tag[x] > 0 — в x начинается свободный промежуток длины tag[x]; tag[x] < 0 — в x кончается промежуток,
     // начавшийся в -tag[x]-1; 0 — ни то ни другое (соседние промежутки всегда склеены). owner[x] — PID трубы
     // в клетке x (в свободных клетках — устаревшее значение, туда не смотрим).
-    Paged tag, owner;
+    Paged tag, owner, zl;               // zl[x] — длина-владелец зарезервированного участка (зоны), 0 — нет
     // Корзины: bucket[s] — начала промежутков длины s (куча по адресу); big — ключ len·2^32 + start.
     // Удаление ленивое: элемент действителен, только если tag[start] всё ещё равен его длине.
     Heap bucket[NB], big;
     int gapCnt[NB];                      // точное число промежутков длины s < NB
 
     std::vector<int> pos, len;           // по PID
+    std::vector<char> alive;
     // признаки при рождении: bit0 — чётность индекса в серии равных длин, bit1 — чётность PID,
     // bit2/3/4 — индекс в серии mod 3 равен 0/1/2
     static const int NF = 5;
@@ -136,8 +155,11 @@ struct Alloc {
     int lastDelPid = 0; bool lastWasDel = false;
 
     Alloc() {
-        pos.push_back(-1); len.push_back(0); feat.push_back(0); stream.push_back(-1);
-        for (int l = 0; l <= MAXL; l++) { cnt[l] = birthL[l] = deathL[l] = recDel[l] = 0; aliveCntL[l] = 0; }
+        pos.push_back(-1); len.push_back(0); feat.push_back(0); stream.push_back(-1); alive.push_back(0);
+        for (int l = 0; l <= MAXL; l++) {
+            cnt[l] = cntF[l] = birthL[l] = deathL[l] = recDel[l] = 0; aliveCntL[l] = 0; lastPtr[l] = 0;
+            for (int k = 0; k < 8; k++) lastOfLen[l][k] = 0;
+        }
         bornLab[0] = bornLab[1] = diedLab[0] = diedLab[1] = 0;
         for (int i = 0; i < NB; i++) gapCnt[i] = 0;
         for (int i = 0; i < 24; i++) deathAge[i] = 0;
@@ -150,7 +172,7 @@ struct Alloc {
     }
 
     // ---- промежутки
-    void ensure(ll n) { tag.grow(n + 1); owner.grow(n + 1); }
+    void ensure(ll n) { tag.grow(n + 1); owner.grow(n + 1); zl.grow(n + 1); }
     void addGap(int s, int l) {
         tag.set(s, l); tag.set(s + l, -s - 1);
         if (l < NB) { bucket[l].push(s); gapCnt[l]++; } else big.push(((ll)l << 32) | s);
@@ -225,6 +247,7 @@ struct Alloc {
         return dmin(1.0, rel / 4);
     }
     double hzRate(int p) const { return (p <= 0 || recDelTot < 1) ? 0 : rateOfLen(len[p]); }
+    double demand(int z) const { return z > MAXL ? 1e9 : (cntTot > 0 ? cnt[z] / cntTot * LW[26] : 0); }
 
     // риск по возрасту: P(труба когда-нибудь умрёт | дожила до своего возраста). Возраст — в укладках;
     // deathAge[b] — смерти в возрасте [2^b - 1, 2^(b+1) - 1), живые с возрастом ≥ 2^b - 1 — из дерева Фенвика по PID.
@@ -340,7 +363,136 @@ struct Alloc {
                  + LW[11] * std::log((double)s / L) + LW[12] * (dead && r >= 4) + LW[15] * (r == 0 ? dmin(hl, hr) : 0)
                  + LW[16] * (r > 0 && r < 2 * m && !dead);
         if (r > 0) c += LW[18] * ds / (1.0 + ns) + LW[19] * dr / (1.0 + nr);
+        if (r > 0 && cntTot >= EXWARM) {   // изменение избытка дыр над ожидаемым спросом: появится дыра r, исчезнет дыра s
+            double exr = nr + 1 - demand(r), exs = ns - demand(s);
+            c += LW[25] * (std::log(1.0 + dmax(0.0, exr)) - std::log(1.0 + dmax(0.0, exs)));
+        }
         return c + LW[17] * seal;
+    }
+
+
+    // ---- зоны по длинам. Генератор открытых тестов удаляет почти всегда одну из последних труб той же длины,
+    // а старые короткие во 2-й фазе 15 — «ходоком», который ползёт вниз по стеку длины почти подряд. Если трубы
+    // частой длины лежат в своём участке по порядку, умершие подряд сливаются в сплошные куски, которые потом
+    // заполняют длинные (15: 0.953 → 0.962). Включено, только пока несколько длин примерно одинаково часты и у
+    // каждой большая популяция (иначе резерв под колебания численности дороже выигрыша: 8/12/13 не затронуты).
+    std::vector<int> slots[MAXL + 1];    // свободные слоты участков длины L (стек)
+    ll resEnd = 0;                       // конец последнего зарезервированного участка
+    bool zonesEnabled() const {
+        if (cntTot < 50 || T < 60) return false;
+        int k = 0; double mx = 0;
+        for (int l = 1; l <= MAXL; l++) { double sh = cnt[l] / cntTot; if (sh > ZSHARE) k++; mx = dmax(mx, sh); }
+        if (!(k >= 4 && k <= ZMAXACT && mx <= ZMAXSHARE)) return false;
+        if (lifoTot < 20 || lifoHit < ZLIFO * lifoTot) return false;
+        double f = 0;
+        for (int l = 1; l <= MAXL; l++) if (cnt[l] > ZSHARE * cntTot) f += cntF[l];
+        return f >= ZFAST * cntFTot;
+    }
+    double cntF[MAXL + 1], cntFTot = 0;  // статистика длин с быстрым затуханием (0.97) — смена режима
+    int lastOfLen[MAXL + 1][8], lastPtr[MAXL + 1];   // 8 последних PID каждой длины
+    double lifoHit = 0, lifoTot = 0;     // доля удалений, попавших в эти 8 (затухание 0.99)
+    bool zoneOn(int z, bool en) const { return en && z > 0 && cnt[z] > ZSHARE * cntTot; }
+    bool occupied(ll x) const { int p = owner.get(x); return p > 0 && alive[p] && pos[p] <= x && x < pos[p] + len[p]; }
+    bool clearOf(int d, int n, int L, bool en) const {   // в [d, d+n) нет клеток чужих (не L) активных зон
+        for (int x = d; x < d + n; x++) { int z = zl.get(x); if (z && z != L && zoneOn(z, en)) return false; }
+        return true;
+    }
+    // Самый левый действительный промежуток длины s, для которого ok(g); элементы кучи возвращаются на место.
+    // mode: 0 — точное попадание в свою/незарезервированную зону, 1 — «редкая длина» (не хвост, не чужая зона).
+    std::vector<int> tmpKeep;
+    int scanGap(int s, int L, int mode, int ts, bool en) {
+        Heap& h = bucket[s];
+        tmpKeep.clear();
+        int res = -1;
+        while (!h.empty() && tmpKeep.size() < 64) {   // не больше 64 промежутков (защита от долгого перебора)
+            int g = (int)h.top(); h.pop();
+            if (tag.get(g) != s || (!tmpKeep.empty() && tmpKeep.back() == g)) continue;
+            tmpKeep.push_back(g);
+            bool ok = mode == 0 ? (zl.get(g) == L || !zoneOn(zl.get(g), en))
+                                : (g != ts && !zoneOn(zl.get(g), en) && clearOf(g, mode == 2 ? s : L, L, en));
+            if (ok) { res = g; break; }
+        }
+        for (size_t i = 0; i < tmpKeep.size(); i++) h.push(tmpKeep[i]);
+        return res;
+    }
+    int scanBig(int L, int ts, bool en, int& outLen, int need) {   // need — сколько клеток проверять на чужие зоны
+        std::vector<ll> keep;
+        int res = -1;
+        while (!big.empty() && keep.size() < 64) {
+            ll k = big.top(); big.pop();
+            int l = (int)(k >> 32), g = (int)(k & 0xffffffffLL);
+            if (tag.get(g) != l || (!keep.empty() && keep.back() == k)) continue;
+            keep.push_back(k);
+            if (g != ts && !zoneOn(zl.get(g), en) && clearOf(g, need < l ? need : l, L, en)) { res = g; outLen = l; break; }
+        }
+        for (size_t i = 0; i < keep.size(); i++) big.push(keep[i]);
+        return res;
+    }
+    // остаток >= m самого редкого размера среди незарезервированных дыр (не хвост); false — нет такой
+    bool rarePlace(int L, int m, int ts, bool en, int& D) {
+        double bc = 1e18; int bg = -1;
+        for (int s = L + m; s < NB; s++) {
+            int g = scanGap(s, L, 1, ts, en);
+            if (g < 0) continue;
+            double c = (double)gapCnt[s - L] * 1000 + s;
+            if (c < bc) { bc = c; bg = g; }
+        }
+        { int bl = 0, g = scanBig(L, ts, en, bl, L); if (g >= 0) { double c = bl; if (c < bc) { bc = c; bg = g; } } }
+        if (bg >= 0) { D = bg; takeFrom(bg, bg, L); return true; }
+        return false;
+    }
+    bool zoneTry(int L, int st, int m, ll& N, int& D) {
+        if (st >= 0) return false;
+        bool en = zonesEnabled();
+        if (!en) return false;
+        int ts = tailStart();
+        N = 0; D = -1;
+        if (L < NB) { int g = scanGap(L, L, 0, ts, en); if (g >= 0) { D = g; takeFrom(g, g, L); return true; } }
+        if (zoneOn(L, en) && aliveCntL[L] >= ZMINALIVE) {
+            // свободный слот своего участка (последний освободившийся — первым)
+            while (!slots[L].empty()) {
+                int d = slots[L].back(); slots[L].pop_back();
+                if (zl.get(d) != L || occupied(d) || occupied(d + L - 1)) continue;
+                ll hs = d; int steps = 0;
+                while (hs > 0 && !occupied(hs - 1) && steps < 4096) { hs--; steps++; }
+                if (steps >= 4096 || tag.get(hs) <= 0 || hs + tag.get(hs) < d + L) continue;
+                D = d; takeFrom((int)hs, D, L); return true;
+            }
+            // участок внутри незарезервированной дыры (>= 4 слотов, ужимается под дыру); иначе незарезервированные
+            // дыры по правилу редкой длины; и лишь потом новый участок в хвосте (иначе, когда короткие возвращаются
+            // после длинных — three_phase, rev_two_phase, — их дыры простаивали бы)
+            {
+                int hl = 0, hg = -1;
+                for (int s2 = 4 * L; s2 < NB && hg < 0; s2++) hg = scanGap(s2, L, 2, ts, en);
+                if (hg >= 0) hl = tag.get(hg);
+                else hg = scanBig(L, ts, en, hl, ZSLOTS * L);
+                if (hg >= 0) {
+                    ll C2 = (ll)ZSLOTS * L, fit = (ll)(hl / L) * L;
+                    if (fit < C2) C2 = fit;
+                    for (ll x = hg; x < hg + C2; x++) zl.set(x, L);
+                    for (ll x = hg + C2 - L; x > hg; x -= L) slots[L].push_back((int)x);
+                    D = hg; takeFrom(hg, D, L);
+                    return true;
+                }
+                if (rarePlace(L, m, ts, en, D)) return true;
+            }
+            // новый участок из ZSLOTS слотов в конце траншеи, за всеми зарезервированными
+            ll C = (ll)ZSLOTS * L;
+            ll stp = ts > resEnd ? ts : resEnd;
+            if (T < stp + C) { N = (stp + C - T + 19) / 20; dig(N); }
+            for (ll x = stp; x < stp + C; x++) zl.set(x, L);
+            for (ll x = stp + C - L; x > stp; x -= L) slots[L].push_back((int)x);
+            resEnd = stp + C;
+            D = (int)stp; takeFrom(tailStart(), D, L);
+            return true;
+        }
+        // редкая длина: незарезервированные дыры по правилу редкой длины, иначе хвост
+        if (rarePlace(L, m, ts, en, D)) return true;
+        ll stp = ts > resEnd ? ts : resEnd;
+        if (T < stp + L) { N = (stp + L - T + 19) / 20; dig(N); }
+        D = (int)stp; takeFrom(tailStart(), D, L);
+        if (resEnd < stp + L && resEnd > ts) resEnd = stp + L;
+        return true;
     }
 
     // ---- команды
@@ -361,6 +513,8 @@ struct Alloc {
         if (F > T) F = (int)T;
         int ts = tailStart();
         double selfHz = recDelTot >= 1 ? rateOfLen(L) : 0;
+        ll N = 0; int D = -1;
+        if (zoneTry(L, st, m, N, D)) { finishPlace(pid, L, N, D, outN, outD); return; }
 
         // прогноз «B вымирает почти целиком, A — нет» подтвердился на помеченных трубах: зона B отделяется —
         // B кладём только в дыры между B (иначе к границе роста), A не занимает дыры между двумя живыми B
@@ -385,7 +539,6 @@ struct Alloc {
         // вне потоков: если лучший промежуток дороже LW[13], а в хвосте место есть без докопки — в хвост
         if (useGap && st < 0 && T - tailStart() >= L && LW[13] < bestC) useGap = false;
 
-        ll N = 0; int D;
         if (useGap) {
             D = chooseSide(bgs, bs, L, st);
             takeFrom(bgs, D, L);
@@ -419,12 +572,17 @@ struct Alloc {
                 F = st == 1 ? D : (int)T;
             }
         }
+        finishPlace(pid, L, N, D, outN, outD);
+    }
+    void finishPlace(int pid, int L, ll N, int D, ll& outN, ll& outD) {
         for (int i = 0; i < L; i++) owner.set(D + i, pid);
-        pos.push_back(D); len.push_back(L);
+        pos.push_back(D); len.push_back(L); alive.push_back(1);
         bitAdd(pid, 1);
         birthL[L] += 1; aliveCntL[L]++; aliveTot++;
-        for (int l = 1; l <= MAXL; l++) cnt[l] *= 0.999;
+        lastOfLen[L][lastPtr[L]] = pid; lastPtr[L] = (lastPtr[L] + 1) & 7;
+        for (int l = 1; l <= MAXL; l++) { cnt[l] *= 0.999; cntF[l] *= 0.97; }
         cntTot = cntTot * 0.999 + 1; cnt[L] += 1;
+        cntFTot = cntFTot * 0.97 + 1; cntF[L] += 1;
         lastWasDel = false;
         outN = N; outD = D;
     }
@@ -436,10 +594,14 @@ struct Alloc {
             double q = (double)(aliveTot - bitSum(pid)) / (aliveTot - 1);
             qSum = qSum * 0.99 + q; qTot = qTot * 0.99 + 1;
         }
-        bitAdd(pid, -1);
+        bitAdd(pid, -1); alive[pid] = 0;
         deathAge[ageBucket((int)pos.size() - 1 - pid)] += 1;
         for (int k = 1; k <= MAXL; k++) recDel[k] *= 0.98;
         recDelTot = recDelTot * 0.98 + 1; recDel[l] += 1; aliveCntL[l]--; aliveTot--;
+        bool hit = false;
+        for (int k = 0; k < 8; k++) if (lastOfLen[l][k] == pid) hit = true;
+        lifoHit = lifoHit * 0.99 + (hit ? 1 : 0); lifoTot = lifoTot * 0.99 + 1;
+        if (zl.get(d) == l) slots[l].push_back(d);
         int e = freeRange(d, l);
         if (d == F) F = e;
         if (stream[pid] >= 0) diedLab[stream[pid]] += 1;

@@ -314,6 +314,90 @@ def gen_two_phase(rng, n):
     return b.cmds
 
 
+def gen_two_phase_real(rng, n):
+    """Ближе к 11/15, чем two_phase (механика снята с самих тестов, 2026-10-19). Ключевое: удаляется труба,
+    выбранная внутри стека СВОЕЙ ДЛИНЫ (на 8, 11–15 ранг среди живых той же длины — медиана 0–2).
+    Граница фаз — ровно n/2. Фаза 1: длины 1..7 равномерно, после укладки Geom(0.2) удалений: длина — случайной
+    живой трубы, ранг внутри длины ≈ Exp(2.5) (5 % — Exp(30)). Фаза 2: длины 8..c, после укладки Geom(0.5)
+    удалений; с вер. ≈ 0.18 — старая короткая: внутри стека её длины работает «ходок» (указатель ползёт вниз почти
+    подряд, ~половину пропускает), к концу фазы всё чаще равномерно по стеку; иначе длинная: 84 % — у вершины стека своей длины (Exp(1.5)),
+    16 % — равномерно внутри стека."""
+    a = 7
+    c = rng.choice([32, 36, 40, 40])
+    split = n // 2
+    p_short = rng.uniform(0.15, 0.2)
+    w_end = rng.uniform(0.14, 0.2)
+    b = Builder(n)
+    pools = {l: Pool(n) for l in range(1, MAX_LEN + 1)}
+    ptr = {l: 0 for l in range(1, MAX_LEN + 1)}
+    lens = {}
+
+    def place(L):
+        p = b.place(L)
+        lens[p] = L
+        pools[L].add(p, 1)
+
+    def pick_len(lo, hi):                              # длина случайной живой трубы из диапазона
+        tot = sum(pools[l].size for l in range(lo, hi + 1))
+        if tot == 0:
+            return None
+        r = rng.randrange(tot)
+        for l in range(lo, hi + 1):
+            if r < pools[l].size:
+                return l
+            r -= pools[l].size
+        return None
+
+    def remove_in(L, r):
+        pl = pools[L]
+        if pl.size == 0:
+            return False
+        p = pl.from_end(max(0, int(r)))
+        pl.add(p, -1)
+        b.remove(p)
+        return True
+
+    while b.room() and len(b.cmds) < split:
+        place(rng.randint(1, a))
+        while b.room() and len(b.cmds) < split and rng.random() < 0.2:
+            L = pick_len(1, a)
+            if L is None:
+                break
+            remove_in(L, rng.expovariate(1 / 2.5) if rng.random() < 0.95 else rng.expovariate(1 / 30))
+    m2 = max(1, n - len(b.cmds))
+    t0 = len(b.cmds)
+    while b.room():
+        place(rng.randint(a + 1, c))
+        while b.room() and rng.random() < 0.5:
+            f = (len(b.cmds) - t0) / m2
+            if rng.random() < p_short:
+                L = rng.randint(1, a)                  # длины старых коротких удаляются поровну
+                sz = pools[L].size
+                if sz == 0:
+                    continue
+                if rng.random() < max(0.0, (f - 0.7) / 0.3) * 0.8 or rng.random() < 0.05:
+                    remove_in(L, sz * rng.random())
+                else:
+                    # «ходок»: указатель ползёт вниз по стеку длины L почти подряд (на 15: |Δ ранга| — медиана 1–2)
+                    step = 0
+                    while rng.random() < 0.45:
+                        step += 1
+                    if rng.random() < 0.05:
+                        step += int(rng.expovariate(1 / 8))
+                    r = min(sz - 1, ptr[L] + step)
+                    remove_in(L, r)
+                    ptr[L] = r
+            else:
+                L = pick_len(a + 1, c)
+                if L is None:
+                    continue
+                if rng.random() < 0.84:
+                    remove_in(L, rng.expovariate(1 / 1.5))
+                else:
+                    remove_in(L, pools[L].size * rng.random())
+    return b.cmds
+
+
 def gen_stress(rng, n):
     """Крайние случаи для памяти/времени: только длинные трубы почти без удалений (траншея до 8·10^6 м)."""
     b = Builder(n)
@@ -382,7 +466,8 @@ CLASSES = {
     "two_phase": (gen_two_phase, [10000, 50000, 200000]),
 }
 # Не входит в 'all' (большие файлы): python3 scripts/gen_tests.py --class stress --count 3
-EXTRA = {"stress": (gen_stress, [200000]), "lifo_mix": (gen_lifo_mix, [1500, 6500, 10000])}
+EXTRA = {"stress": (gen_stress, [200000]), "lifo_mix": (gen_lifo_mix, [1500, 6500, 10000]),
+         "two_phase_real": (gen_two_phase_real, [10000, 50000, 200000])}
 
 
 def validate(cmds):

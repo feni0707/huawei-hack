@@ -7,8 +7,9 @@ from concurrent.futures import ThreadPoolExecutor
 TAG=sys.argv[1] if len(sys.argv)>1 else 'run'
 GENS=int(sys.argv[2]) if len(sys.argv)>2 else 120
 BASE_SF=os.environ.get('BASE_SF','14=6 15=0')
-W0=np.array([1,0,0,0,0,0,0,0,0,0,0,0,1000,150,0,0,0,3,0,0],float)
-SC=np.array([0,5,5,2,5,50,50,5,2,5,2,5,200,50,0,5,3,3,50,50],float)
+W0=np.array([1,0,0,0,0,0,0,0,0,0,0,0,1000,150,0,0,0,3,0,0,0,0,0,0,0,0,0],float)
+SC=np.array([0,5,5,2,5,50,50,5,2,5,2,5,200,50,0,5,3,3,50,50,0,0,5,5,200,5,30],float)
+if os.environ.get('SC'): SC=np.array(list(map(float,os.environ['SC'].split())),float)
 if os.environ.get('W0'): W0=np.array(list(map(float,os.environ['W0'].split())),float)
 if os.environ.get('SIG'): sigma0=float(os.environ['SIG'])
 idx=[i for i in range(len(W0)) if SC[i]>0]
@@ -16,9 +17,9 @@ def files(sets):
     out=[]
     for g in sets: out+=sorted(glob.glob(g))
     return out
-TRAIN=files(['build/lifo/a/*/*.in']+[f'build/big/s10{i}/{c}/*.in' for i in range(6) for c in ['alternating','two_phase','phases','sorted_groups','periodic']])
-VAL=files(['build/lifo/b/*/*.in']+[f'build/big/{s}/{c}/*.in' for s in ['s106','s107','s108','s109','s110','s111'] for c in ['alternating','two_phase','phases','sorted_groups','periodic']])
-CW={'two_phase':10,'alternating':4,'lifo_mix':4,'phases':4,'sorted_groups':1,'periodic':1}
+TRAIN=files(os.environ.get('TRAIN_EXTRA','').split()+['build/lifo/a/*/*.in']+[f'build/big/s10{i}/{c}/*.in' for i in range(6) for c in ['alternating','two_phase','phases','sorted_groups','periodic']])
+VAL=files(os.environ.get('VAL_EXTRA','').split()+['build/lifo/b/*/*.in']+[f'build/big/{s}/{c}/*.in' for s in ['s106','s107','s108','s109','s110','s111'] for c in ['alternating','two_phase','phases','sorted_groups','periodic']])
+CW={'two_phase_real':10,'two_phase':10,'alternating':4,'lifo_mix':4,'phases':4,'sorted_groups':1,'periodic':1}
 def chunks(l,k): return [l[i::k] for i in range(k)]
 def evalw(w, fl, nsplit=1):
     sw=' '.join(f'{x:.6g}' for x in w)
