@@ -50,7 +50,8 @@ typedef long long ll;
 static const int NB = 128;     // промежутки короче NB — в корзинах по точной длине, длиннее — в общей куче
 static const int MAXL = 40;    // максимальная длина трубы
 static const int CHUNK = 400;  // участок, который докапывается под поток B, м
-static const int CHUNK_MIN = 200, CHUNK_PER_L = 10;   // нижняя граница участка, пока потоки не доказали экономию
+static const int CHUNK_MIN = 200, CHUNK_PER_L = 10;
+static const int CHUNK_LOW = 40, CHUNK_LOW_AGE = 1000;   // нижняя граница, если тень долго не видит экономии   // нижняя граница участка, пока потоки не доказали экономию
 static const int FIT_EXTRA = 4, FIT_RUN = 30;   // подгонка участка под длину серии (см. fitChunk)
 static const ll SHADOW_MAX_T = 3000000;   // тень удваивает память; в траншее длиннее участок C/2 ничтожен — тень удаляем
 // Зоны по длинам (см. zoneTry): слотов в участке, мин. доля длины среди недавних укладок, макс. число таких длин,
@@ -188,7 +189,7 @@ struct Alloc {
     bool flip = false;                   // в текущем участке B растёт слева, A — справа (участки зеркальны)
     // тень без потоков: та же история команд, своя раскладка (до первой возможной метки совпадает с нами)
     bool noStreams = false, shadowDropped = false;
-    Alloc* shadow = 0;
+    Alloc* shadow = 0; ll shadowBorn = 0;
     ll occ = 0;                          // занято метров
     int runIdx = 0, lastL = 0;
     double coSame[NF], coTot[NF];        // соседние удаления в пачке: совпал ли признак (с затуханием)
@@ -602,6 +603,7 @@ struct Alloc {
         bool any = false;
         for (int f = 0; f < NF; f++) if (kappa(f) >= 0.6) any = true;   // иначе chooseStream точно вернёт -1
         if (!any) return;
+        shadowBorn = (ll)pos.size();
         shadow = new Alloc(*this);
         shadow->shadow = 0; shadow->noStreams = true;
     }
@@ -675,6 +677,9 @@ struct Alloc {
             if (shadow) {
                 ll c = CHUNK_MIN, sv = shadow->freeIn() - freeIn();
                 if ((ll)CHUNK_PER_L * L > c) c = (ll)CHUNK_PER_L * L;
+                // тень уже CHUNK_LOW_AGE укладок не подтверждает экономию — нижняя граница участка 40 + L
+                // (недозаполненный участок в конце теста — чистая потеря: pairs +0.6…0.8 %)
+                if ((ll)pos.size() - shadowBorn > CHUNK_LOW_AGE && sv < c && CHUNK_LOW + L < c) c = CHUNK_LOW + L;
                 if (sv > c) c = sv;
                 if (c < chunk) chunk = (int)c;
             }
