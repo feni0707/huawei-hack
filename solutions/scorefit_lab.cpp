@@ -30,7 +30,7 @@ typedef long long ll;
 // P53 эндшпиль (последние P53 команд до лимита P54 или 200000 — чистый best fit; вредно, выкл.);
 // P55 зона B при подтверждённых потоках (порог P9): 1 — B только в дыры между B, 2 — ещё и A не в дыры между двумя B;
 // P56 сторона остатка по порядку смертей (умирают старые — к старшему соседу), P57 затухание этой статистики
-static double P[64] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.9, 2, 0, 3, 60, 6, 0, 0, 3, 4, 0, 400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 2, 0, 0, 0.3, 0, 0.99, 0.05, 0, 0, 0, 0, 1, 0, 0, 0, 8, 0.999, 1.5, 0, 0, 0, 0, 2, 1, 0.99};
+static double P[96] = {0.999, 0.002, 0, 0, 1, 0, 1, 0, 1, 0.9, 2, 0, 3, 60, 6, 0, 0, 3, 4, 0, 400, 20, 0.6, 0.999, 0.998, 0, 0, 0.99, 0.5, 0, 4, 0.98, 2000, 2, 0, 0, 0.3, 0, 0.99, 0.05, 0, 0, 0, 0, 1, 0, 0, 0, 8, 0.999, 1.5, 0, 0, 0, 0, 2, 1, 0.99, 0, 1, 10, 0};
 
 // P14=6 (по умолчанию): линейная оценка кандидатов вне потоков, веса LW (env SFW="w0 w1 ..." — переопределить);
 // старое поведение (best fit + правила) — SF="14=0 15=4"
@@ -195,7 +195,20 @@ struct Alloc {
         if (p <= 0 || recDelTot < 1) return 0;
         int l = len[p];
         double rel = (recDel[l] / recDelTot) / ((double)std::max(1, aliveCntL[l]) / std::max(1, aliveTot));
-        return std::min(1.0, rel / P[30]);
+        return std::max(std::min(1.0, rel / P[30]), modRate(p));
+    }
+    // P61 >= 2: интенсивность смертей по классу PID mod m (m = 2..P61): доля недавних удалений / доля живых, max по m
+    static const int MODMAX = 16;
+    double recDelMod[MODMAX + 1][MODMAX] = {}; int aliveMod[MODMAX + 1][MODMAX] = {};
+    double modRate(int p) const {
+        if (p <= 0 || recDelTot < 1 || P[61] < 2) return 0;
+        double best = 0;
+        for (int m = 2; m <= (int)P[61]; m++) {
+            int r = p % m;
+            double rel = (recDelMod[m][r] / recDelTot) / ((double)std::max(1, aliveMod[m][r]) / std::max(1, aliveTot));
+            if (rel > best) best = rel;
+        }
+        return std::min(1.0, best / P[30]);
     }
     double hz2(int p) const { return P[18] == 4 ? hzRate(p) : P[18] == 1 ? pdieLen(p) : P[18] == 2 ? std::max(pdieLen(p), hazard(p)) : P[18] == 3 ? pdieLen(p) * hazard(p) : hazard(p); }
 #ifdef SIM
@@ -219,6 +232,7 @@ struct Alloc {
     int chooseStream(int pid, int L) {
         unsigned char fv = feat[pid];
         if (P[10] == 1 && oracleDeath) {
+            if (L < P[62] || (P[63] > 0 && L >= P[63])) return -1;   // оракул только для длин [P62, P63)
             int dt = oracleDeath[pid];
             return dt >= 0 && dt - curCmd <= P[11] ? 1 : 0;
         }
@@ -234,6 +248,10 @@ struct Alloc {
             if (s > bs) { bs = s; bf = f; }
         }
         if (bf < 0) { curFeat = -1; return -1; }
+        // P64 > 0: фальсификация — помечено >= P64 труб, а умерло из них < P65 доли: прогноз не сбывается
+        if (P[64] > 0 && bornLab[0] + bornLab[1] >= P[64] && diedLab[0] + diedLab[1] < P[65] * (bornLab[0] + bornLab[1])) {
+            curFeat = -1; return -1;
+        }
         if (cs >= 0 && bs < cs + 0.2) bf = curFeat;
         curFeat = bf;
         int v = (fv >> bf) & 1;
@@ -315,7 +333,7 @@ struct Alloc {
         if (P[14] == 5 && ++wAge >= 64) rebuildW();
         double selfHz = 0;
         if (P[18] == 4 && recDelTot >= 1)
-            selfHz = std::min(1.0, (recDel[L] / recDelTot) / ((double)std::max(1, aliveCntL[L]) / std::max(1, aliveTot)) / P[30]);
+            selfHz = std::max(std::min(1.0, (recDel[L] / recDelTot) / ((double)std::max(1, aliveCntL[L]) / std::max(1, aliveTot)) / P[30]), modRate(pid));
         double bestC = 1e18; int bgs = -1, bs = 0;
         int M = P[4] > 0 ? (int)P[4] : 1;  // сколько промежутков каждой длины смотреть
         // P53 > 0: последние P53 команд до лимита 200000 (P54 — лимит, если задан) — будущего почти нет
@@ -479,6 +497,10 @@ struct Alloc {
             takeFrom(bgs, D, L);
         } else {
             if (P[40] == 1 && st == 1 && !streamsVerified()) st = 0;   // не подтверждено — B кладём как A
+            // P58: «двусторонний хвост» — серия равных коротких длин (индекс в серии >= P59, L <= P60) до обнаружения
+            // потоков: нечётные по индексу — к правой границе роста, чётные — к левой, без лишней докопки
+            bool pseudo = P[58] != 0 && st < 0 && runIdx >= P[59] && L <= P[60];
+            if (pseudo) st = runIdx & 1;
             bool smallChunk = P[40] == 2 && st >= 0 && !streamsVerified();
             int fgs = (F > 0 && tag[F] < 0) ? -tag[F] - 1 : F;
             int fl = F - fgs;
@@ -487,6 +509,7 @@ struct Alloc {
             if (P[35] > 0) chunk = std::min(chunk, std::max(2 * L, (int)(P[35] * T)));   // не больше доли траншеи
             if (P[37] > 0 && st == 1) chunk = std::min(chunk, std::max(L, (int)(P[37] * fbVol)));
             if (smallChunk) chunk = std::min(chunk, (int)P[42]);
+            if (pseudo) chunk = 0;
             if (fl >= L) {
                 D = st == 1 ? F - L : fgs;
                 takeFrom(fgs, D, L);
@@ -521,6 +544,7 @@ struct Alloc {
         fbVol = fbVol * P[38] + ((st == 1 && !useGap) ? L : 0);
         bOnBirth(pid);
         pos.push_back(D); len.push_back(L); alive.push_back(1); birthL[L] += 1; aliveCntL[L]++; aliveTot++;
+        if (P[61] >= 2) for (int m = 2; m <= (int)P[61]; m++) aliveMod[m][pid % m]++;
         // после расширения rebuildBit уже учёл pid (alive[pid] = 1) — второй bitAdd давал «призрачных» живых
         if ((int)aliveBit.size() <= pid) { aliveBit.resize(std::max<size_t>(pid + 1, aliveBit.size() * 2 + 16), 0); rebuildBit(); }
         else bitAdd(pid, 1);
@@ -543,6 +567,10 @@ struct Alloc {
         alive[pid] = 0; bitAdd(pid, -1); deathL[l] += 1; bOnDeath(pid);
         for (int k = 1; k <= MAXL; k++) recDel[k] *= P[31];
         recDelTot = recDelTot * P[31] + 1; recDel[l] += 1; aliveCntL[l]--; aliveTot--;
+        if (P[61] >= 2) for (int m = 2; m <= (int)P[61]; m++) {
+            for (int r = 0; r < m; r++) recDelMod[m][r] *= P[31];
+            recDelMod[m][pid % m] += 1; aliveMod[m][pid % m]--;
+        }
         deathAge[ageBucket((int)pos.size() - 1 - pid)] += 1;
         int e = freeRange(d, l);
         if (d == F) F = e;
@@ -602,7 +630,7 @@ int main(int argc, char** argv) {
         char* p = (char*)s;
         while (*p) {
             char* q; long i = strtol(p, &q, 10); if (q == p || *q != '=') break;
-            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 64) P[i] = v; p = q;
+            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 96) P[i] = v; p = q;
         }
     }
     if (const char* s = getenv("SFW")) {
@@ -748,7 +776,7 @@ int main() {
         char* p = (char*)s;
         while (*p) {
             char* q; long i = strtol(p, &q, 10); if (q == p || *q != '=') break;
-            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 64) P[i] = v; p = q;
+            p = q + 1; double v = strtod(p, &q); if (q == p) break; if (i >= 0 && i < 96) P[i] = v; p = q;
         }
     }
     if (const char* s = getenv("SFW")) {

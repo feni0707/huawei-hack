@@ -9,7 +9,8 @@ python3 scripts/gen_robust3.py [--seed S] [--count K] [--out DIR] -> DIR/<class>
   pairs       — пары (длинная, короткая), позже удаляется один из элементов пары (всегда один и тот же)
   regimes     — марковская смена режимов длин (диапазоны), удаляются свежие
   queue_mix   — удаления то из начала (FIFO), то из конца (LIFO)
-  rev_two_phase, stack_swings, parity_flip, triplets, two_lengths, del_half_group — см. docstring функций
+  rev_two_phase, stack_swings, parity_flip, triplets, two_lengths, del_half_group,
+  walk_len, bimodal_life, pid_mod, len_class_death, old_window, long_then_ones — см. комментарии функций
 """
 import argparse, os, random, sys
 import importlib.util
@@ -197,6 +198,89 @@ def del_half_group(r, n):
 
 CLASSES.update(rev_two_phase=rev_two_phase, stack_swings=stack_swings, parity_flip=parity_flip,
                triplets=triplets, two_lengths=two_lengths, del_half_group=del_half_group)
+
+
+def walk_len(r, n):
+    # длина — случайное блуждание ±1..3, удаляются свежие и изредка старые
+    b = B(n); L = r.randint(1, 40)
+    while b.room():
+        L = max(1, min(40, L + r.randint(-3, 3))); b.place(L)
+        while b.room() and len(b.alive) > 1 and r.random() < 0.43:
+            b.remove_recent(r, 20) if r.random() < 0.85 else b.remove(r.choice(b.alive))
+    return b.cmds
+
+
+def bimodal_life(r, n):
+    # каждая труба с вероятностью p умирает почти сразу (1–5 команд), иначе живёт вечно; признаков нет
+    b = B(n); ln = len_sampler(r); p = r.uniform(0.3, 0.7); pend = []
+    while b.room():
+        x = b.place(ln())
+        if r.random() < p: pend.append((len(b.cmds) + r.randint(1, 5), x))
+        while pend and pend[0][0] <= len(b.cmds) and b.room():
+            _, y = pend.pop(0)
+            if b.is_alive(y): b.remove(y)
+    return b.cmds
+
+
+def pid_mod(r, n):
+    # группы, удаляется каждая k-я (k = 4 или 5) — признака mod k у потоков нет
+    b = B(n); k = r.choice([4, 5]); L = r.randint(1, 6)
+    while b.room(300):
+        pids = [b.place(L) for _ in range(r.randint(60, 300))]
+        off = r.randrange(k)
+        for i, x in enumerate(pids):
+            if i % k == off and b.room(): b.remove(x)
+        L = min(40, L + r.randint(0, 3))
+    return b.cmds
+
+
+def len_class_death(r, n):
+    # набор длин меняется по эпохам; при смене эпохи трубы одной старой длины постепенно вымирают
+    b = B(n); lens = r.sample(range(1, 41), 4); by = {}
+    while b.room(10):
+        for _ in range(r.randint(300, 1500)):
+            if not b.room(2): break
+            L = r.choice(lens); by.setdefault(L, []).append(b.place(L))
+            if r.random() < 0.3:
+                v = r.choice(lens)
+                if by.get(v):
+                    x = by[v].pop(r.randrange(len(by[v])))
+                    if b.is_alive(x) and b.room(): b.remove(x)
+        dead = lens.pop(r.randrange(len(lens)))
+        for x in by.pop(dead, []):
+            if b.is_alive(x) and b.room() and r.random() < 0.9: b.remove(x)
+        lens.append(r.choice([v for v in range(1, 41) if v not in lens]))
+    return b.cmds
+
+
+def old_window(r, n):
+    # все длины; удаления: свежие или случайные из окна в глубине (как 2-я фаза 15, но без смены длин)
+    b = B(n); ln = len_sampler(r); pw = r.uniform(0.1, 0.4)
+    while b.room():
+        b.place(ln())
+        while b.room() and len(b.alive) > 2 and r.random() < 0.45:
+            if r.random() < pw:
+                k = len(b.alive); srt = sorted(b.alive)
+                b.remove(srt[int(k * r.uniform(0.5, 0.9))])
+            else: b.remove_recent(r, 30)
+    return b.cmds
+
+
+def long_then_ones(r, n):
+    # длинные, случайная половина умирает, дальше только единички (и немного удалений)
+    b = B(n); split = int(n * r.uniform(0.3, 0.5))
+    while b.room() and len(b.cmds) < split:
+        b.place(r.randint(10, 40))
+    for x in r.sample(b.alive, len(b.alive) // 2):
+        if b.room(): b.remove(x)
+    while b.room():
+        b.place(1)
+        if r.random() < 0.2 and b.room() and len(b.alive) > 1: b.remove_recent(r, 10)
+    return b.cmds
+
+
+CLASSES.update(walk_len=walk_len, bimodal_life=bimodal_life, pid_mod=pid_mod, len_class_death=len_class_death,
+               old_window=old_window, long_then_ones=long_then_ones)
 
 
 def main():
