@@ -34,6 +34,8 @@
 //   7. Признак LW25: изменение избытка дыр над ожидаемым спросом (держать разнообразие размеров дыр, чтобы
 //      следующие трубы находили точные дыры).
 //   8. Сторона остатка — по «гонке соседей» (какой из соседей промежутка умирает первым), если статистика уверенная.
+//   9. «Мёртвый» остаток — короче минимальной ожидаемой длины m; m не меньше самой короткой длины за последние
+//      1000 укладок (после смены режима медленная статистика отставала: two_phase_real 10 тыс. команд +0.7 %).
 //
 // Код написан с оглядкой на перенос на Cangjie: без std::set/map/priority_queue и лямбд — кучи и
 // постраничные массивы сделаны вручную, все структуры — массивы.
@@ -57,8 +59,9 @@ static const int ZMAXACT = 8;
 static const double ZMAXSHARE = 0.25;
 static const int ZMINALIVE = 150;
 static const double ZFAST = 0.7;     // смена режима: доля длин с зонами среди недавних укладок (затухание 0.97) ниже — выкл.
-static const double EXWARM = 300;
-static const double ZLIFO = 0.7;     // зоны — только если удаления «по стеку длины»: удаляемая среди 8 последних той же длины    // признак LW25 — только после прогрева статистики длин (cntTot)
+static const double EXWARM = 300;  // признак LW25 — только после прогрева статистики длин (cntTot)
+static const int MSEEN = 1000;     // окно (укладок) для минимальной ожидаемой длины, см. minRecent
+static const double ZLIFO = 0.7;     // зоны — только если удаления «по стеку длины»: удаляемая среди 8 последних той же длины
 
 // Веса линейной оценки кандидата (вне потоков). Подобраны CMA-ES на сгенерированных классах (two_phase,
 // alternating, lifo_mix, phases, sorted_groups, periodic; scripts/cmaes_weights.py) и проверены на независимых наборах.
@@ -153,6 +156,7 @@ struct Alloc {
 
     // статистика длин укладок (с затуханием) — для «минимальной ожидаемой длины»
     double cnt[MAXL + 1], cntTot = 0;
+    int lastSeen[MAXL + 1];              // PID последней трубы каждой длины (0 — не было)
     // доля смертей по длине за всё время (для крошечной траншеи)
     double birthL[MAXL + 1], deathL[MAXL + 1];
     // текущая интенсивность смертей по длине: недавние удаления (с затуханием) и число живых
@@ -183,7 +187,7 @@ struct Alloc {
     Alloc() {
         pos.push_back(-1); len.push_back(0); feat.push_back(0); stream.push_back(-1); alive.push_back(0);
         for (int l = 0; l <= MAXL; l++) {
-            cnt[l] = cntF[l] = birthL[l] = deathL[l] = recDel[l] = 0; aliveCntL[l] = 0; lastPtr[l] = 0;
+            cnt[l] = cntF[l] = birthL[l] = deathL[l] = recDel[l] = 0; aliveCntL[l] = 0; lastPtr[l] = 0; lastSeen[l] = 0;
             for (int k = 0; k < 8; k++) lastOfLen[l][k] = 0;
         }
         bornLab[0] = bornLab[1] = diedLab[0] = diedLab[1] = 0;
@@ -261,9 +265,15 @@ struct Alloc {
     }
 
     // ---- статистика
-    int minRecent() const {   // минимальная длина, доля которой в недавних укладках > 0.2 %
-        for (int l = 1; l <= MAXL; l++) if (cnt[l] > 0.002 * cntTot) return l;
-        return 1;
+    // Минимальная ожидаемая длина: самая короткая, доля которой в недавних укладках > 0.2 %, но не меньше самой
+    // короткой длины среди последних MSEEN укладок. Медленная статистика после смены режима (2-я фаза 11/15:
+    // только длины ≥ 8) отстаёт на ~4000 укладок — всё это время мёртвые остатки 1–7 м считались живыми.
+    int minRecent() const {
+        int a = 1;
+        for (int l = 1; l <= MAXL; l++) if (cnt[l] > 0.002 * cntTot) { a = l; break; }
+        int np = (int)pos.size() - 1;
+        for (int l = 1; l <= MAXL; l++) if (lastSeen[l] > 0 && np - lastSeen[l] < MSEEN) { if (l > a) a = l; break; }
+        return a;
     }
     double pdieLen(int p) const {
         if (p <= 0) return 0;
@@ -664,7 +674,7 @@ struct Alloc {
         pos.push_back(D); len.push_back(L); alive.push_back(1);
         bitAdd(pid, 1);
         birthL[L] += 1; aliveCntL[L]++; aliveTot++;
-        lastOfLen[L][lastPtr[L]] = pid; lastPtr[L] = (lastPtr[L] + 1) & 7;
+        lastOfLen[L][lastPtr[L]] = pid; lastPtr[L] = (lastPtr[L] + 1) & 7; lastSeen[L] = pid;
         for (int l = 1; l <= MAXL; l++) { cnt[l] *= 0.999; cntF[l] *= 0.97; }
         cntTot = cntTot * 0.999 + 1; cnt[L] += 1;
         cntFTot = cntFTot * 0.97 + 1; cntF[L] += 1;
