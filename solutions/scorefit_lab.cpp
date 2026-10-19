@@ -113,6 +113,30 @@ struct Alloc {
         return 1;
     }
 
+    // ---- заполнимость остатка: U[r] = u(r)·(средняя длина), u — вероятность обновления (какая-то
+    // последовательность случайных труб из текущего распределения длин ляжет ровно в r). U ≈ 1 для «хороших» r,
+    // 0 — для незаполнимых (короче всех длин или не представимых суммой частых длин, напр. 11 при длинах 5/10).
+    static const int UR = 161;
+    double U[UR] = {0};
+    int uAge = 1 << 30;
+    void rebuildU() {
+        uAge = 0;
+        if (cntTot <= 0) { for (int r = 0; r < UR; r++) U[r] = 1; return; }
+        double p[MAXL + 1], mean = 0;
+        for (int l = 1; l <= MAXL; l++) { p[l] = cnt[l] / cntTot; if (p[l] < P[71]) p[l] = 0; }
+        double z = 0; for (int l = 1; l <= MAXL; l++) z += p[l];
+        if (z <= 0) { for (int r = 0; r < UR; r++) U[r] = 1; return; }
+        for (int l = 1; l <= MAXL; l++) { p[l] /= z; mean += l * p[l]; }
+        double u[UR]; u[0] = 1;
+        for (int r = 1; r < UR; r++) {
+            double v = 0;
+            for (int l = 1; l <= MAXL && l <= r; l++) v += p[l] * u[r - l];
+            u[r] = v;
+        }
+        for (int r = 0; r < UR; r++) U[r] = std::min(1.0, u[r] * mean);
+    }
+    double fillU(int r) const { return r <= 0 ? 1 : r >= UR ? 1 : U[r]; }
+
     // ---- модель ожидаемых потерь дыры: W[r] — сколько метров дыры длины r останется пустыми,
     // если её заполнять случайными трубами из текущего распределения длин
     double W[NB] = {0};
@@ -310,6 +334,7 @@ struct Alloc {
 
     std::pair<ll,ll> place(int L) {
         int m = minRecent();
+        if (++uAge >= 64) rebuildU();
         int pid = (int)pos.size();
         if (L == lastL) runIdx++; else { runIdx = 0; curRun++; }
         runOf.push_back(curRun);
@@ -371,6 +396,10 @@ struct Alloc {
                     + LW[5] * dr + LW[6] * ds + LW[7] * (r > 0 ? hside : 0) + LW[8] * (dead ? r * (1 - std::max(hl, hr)) : 0)
                     + LW[9] * (r == 0 ? hzn : 0) + LW[10] * std::log(1.0 + (double)bucketSize(s)) + LW[11] * std::log((double)s / L)
                     + LW[12] * (dead && r >= 4) + LW[15] * (r == 0 ? std::min(hl, hr) : 0) + LW[16] * (r > 0 && r < 2 * m && !dead);
+                if (r > 0 && (LW[20] != 0 || LW[21] != 0)) {   // незаполнимый остаток
+                    double nf = 1 - fillU(r);
+                    cst += LW[20] * nf + LW[21] * nf * r;
+                }
                 if (LW[18] != 0 && r > 0) cst += LW[18] * ds / (1.0 + (double)bucketSize(s));   // ломаем дефицитный размер
                 if (LW[19] != 0 && r > 0) cst += LW[19] * dr / (1.0 + (double)bucketSize(r));   // остаток — дефицитного размера
                 if (r == 0 && LW[17] != 0) {   // исходный штраф «замуровывания» (как P17/P39)
