@@ -49,9 +49,9 @@ typedef long long ll;
 
 static const int NB = 128;     // промежутки короче NB — в корзинах по точной длине, длиннее — в общей куче
 static const int MAXL = 40;    // максимальная длина трубы
-static const int CHUNK = 400;  // участок, который докапывается под поток B, м
-static const int CHUNK_MIN = 200, CHUNK_PER_L = 10;
-static const int CHUNK_LOW = 40, CHUNK_LOW_AGE = 1000;   // нижняя граница, если тень долго не видит экономии   // нижняя граница участка, пока потоки не доказали экономию
+static const int CHUNK = 400, CHUNK_SAME = 800;   // участок под поток B, м (CHUNK_SAME — при группах одного размера)
+static const int CHUNK_MIN = 200, CHUNK_PER_L = 10;   // нижняя граница участка, пока потоки не доказали экономию
+static const int CHUNK_LOW = 40, CHUNK_LOW_AGE = 1000;   // нижняя граница, если тень долго не видит экономии
 static const int FIT_EXTRA = 4, FIT_RUN = 30;   // подгонка участка под длину серии (см. fitChunk)
 static const ll SHADOW_MAX_T = 3000000;   // тень удваивает память; в траншее длиннее участок C/2 ничтожен — тень удаляем
 // Зоны по длинам (см. zoneTry): слотов в участке, мин. доля длины среди недавних укладок, макс. число таких длин,
@@ -679,6 +679,10 @@ struct Alloc {
             int fl = F - fgs;
             // участок: не больше доказанной тенью экономии потоков (но не меньше max(200, 10·L))
             int chunk = CHUNK;
+            // группы одного размера (две последние серии равных длин отличаются ≤ 2 %, как в 5/9): участок может быть
+            // больше (CHUNK_SAME), но не больше, чем осталось до конца текущей группы (ниже)
+            bool sameGroups = runPrev > 0 && runIdx >= FIT_RUN && 50 * dabs(runPrev - runLast) <= imax(runPrev, runLast);
+            if (sameGroups) chunk = CHUNK_SAME;
             if (shadow) {
                 ll c = CHUNK_MIN, sv = shadow->freeIn() - freeIn();
                 if ((ll)CHUNK_PER_L * L > c) c = (ll)CHUNK_PER_L * L;
@@ -687,9 +691,8 @@ struct Alloc {
                 if ((ll)pos.size() - shadowBorn > CHUNK_LOW_AGE && sv < c && CHUNK_LOW + L < c) c = CHUNK_LOW + L;
                 if (sv > c) c = sv;
                 if (c < chunk) chunk = (int)c;
-                // группы одинакового размера (две последние серии отличаются ≤ 2 %, как в 5/9): участок не больше,
-                // чем осталось до конца текущей группы (но ≥ 4·L) — последний участок в конце теста не пустует
-                if (runPrev > 0 && runIdx >= FIT_RUN && 50 * dabs(runPrev - runLast) <= imax(runPrev, runLast)) {
+                // остаток текущей группы (но ≥ 4·L) — последний участок в конце теста не пустует
+                if (sameGroups) {
                     ll rem = (ll)(runLast - runIdx) * L;
                     if (rem < 4 * L) rem = 4 * L;
                     if (rem < chunk) chunk = (int)rem;
