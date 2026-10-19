@@ -40,6 +40,7 @@ python3 scripts/kpi_upper_bound.py materials/tests      # верхние оце�
 
 python3 scripts/gen_tests.py --clean                    # сгенерировать тесты всех классов в build/gen/<class>/ (seed 1)
 python3 scripts/gen_tests.py --class random_bursts --size 200000 --count 3 --seed 2   # один класс, свой размер/seed
+python3 scripts/gen_prefix.py materials/tests/15.in 10000 20000 phase2 1 build/p15.in   # префикс открытого теста + другое продолжение
 python3 scripts/bench.py build/naive solutions/foo.cpp  # таблица: open Σw, avg KPI по gen-классам, WA/TL, CPU
 python3 scripts/bench.py --diff build/naive build/bin/foo   # потестовое сравнение двух решений
 python3 scripts/bench.py build/bin/foo -j 1             # точный CPU (параллельный прогон его завышает)
