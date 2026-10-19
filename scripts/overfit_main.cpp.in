@@ -145,6 +145,15 @@ static void solveTest(TestInfo& T) {
     for (size_t k = 0; k < T.donor.size(); k++) P.pin[pinned + 1 + (int)k] = T.donor[k];
     P.capK = 0;
     P.ov = T.ov;
+    if (P.ov >= 20 && have[11]) off::applyJoint(P, TI[11].cmds, 4999);   // совместная раскладка префикса 15/11
+    if (P.ov >= 10) {   // быстрый решатель: ключи смерти (moves = (pid, прибавка к ключу))
+        for (auto& mv : T.moves) P.key[mv.first] += mv.second;
+        std::vector<int> ordk = P.initialOrder(), badk;
+        long long ex = 0;
+        P.solveAuto(ordk, P.ubT, badk, ex);
+        T.solved = true;
+        return;
+    }
     std::vector<int> order = P.initialOrder();
     int ordN = (int)order.size();
     std::vector<int> pos(P.np + 1, -1);

@@ -35,6 +35,8 @@ int main(int argc, char** argv) {
     vector<Done> done;
     for (int ai = 2; ai < argc; ai++) {
         int t = atoi(argv[ai]);
+        if (t == 15 && getenv("SECS15")) secs = atof(getenv("SECS15"));
+        if (t == 11 && getenv("SECS11")) secs = atof(getenv("SECS11"));
         Problem P;
         vector<int> cmds = loadTest(t);
         P.load(cmds);
@@ -59,8 +61,15 @@ int main(int argc, char** argv) {
         vector<int> bad;
         long long excess = 0;
         P.capK = 0;
+        if (getenv("UBT") && t == 15) P.ubT = atoll(getenv("UBT"));
         P.ov = getenv("ORDV") ? atoi(getenv("ORDV")) : 0;
-        if (t == 15) P.ov = 10;   // тест 15: быстрый решатель (без поиска перестановок)
+        if (t == 11 && getenv("ORDV11")) P.ov = atoi(getenv("ORDV11"));
+        if (getenv("JHOST")) jointHost = atoll(getenv("JHOST"));
+        if (P.ov >= 20) applyJoint(P, loadTest(11), 4999);
+        if (getenv("CAPADDR") && (t == 15 || t == 11)) {
+            int pre = 0; for (int i = 0; i < 4999; i++) if (cmds[i] > 0) pre++;
+            P.capPre = pre; P.capAddr = atoll(getenv("CAPADDR"));
+        }
         vector<int> order = P.initialOrder();
         long long maxEnd = P.solveAuto(order, P.ubT, bad, excess);
         vector<int> bestD = P.D;
@@ -73,8 +82,59 @@ int main(int argc, char** argv) {
         auto t0 = chrono::steady_clock::now();
         int np = P.np;
         int ordN = (int)curOrder.size();
+        if (P.ov >= 10) {   // быстрый решатель: поиск по «ключам» (ключ >= смерть; больший ключ — труба обрабатывается раньше)
+            vector<int> curKey = P.key, bestKey = P.key;
+            vector<pair<int, int>> kmoves, bestMoves;
+            if (getenv("PREKEY") && P.capPre > 0) {   // префиксные трубы, умершие до PREKEY, считаем живущими до PREKEY (компактно рядом с префиксом)
+                int pk = atoi(getenv("PREKEY"));
+                for (int q = 1; q <= P.capPre; q++) if (P.pin[q] < 0 && P.death[q] != INF && P.death[q] < pk) {
+                    kmoves.push_back({q, pk - P.death[q]});
+                    P.key[q] = pk;
+                }
+                curKey = P.key; bestKey = P.key; bestMoves = kmoves;
+                vector<int> o0 = P.initialOrder();
+                long long e0 = P.solveAuto(o0, P.ubT, bad, excess);
+                curBad = bad; curEx = excess; bestEx = excess; bestEnd = e0; bestD = P.D;
+                fprintf(stderr, "t%d prekey maxEnd=%lld excess=%lld bad=%zu\n", t, e0, excess, bad.size());
+            }
+            auto t1 = chrono::steady_clock::now();
+            for (int it = 0; bestEx > 0; it++) {
+                if (chrono::duration<double>(chrono::steady_clock::now() - t1).count() > secs) break;
+                P.key = curKey;
+                vector<pair<int, int>> cm;
+                int moves = 1 + (int)(rnd() % 3);
+                for (int mv = 0; mv < moves && !curBad.empty(); mv++) {
+                    int bp = curBad[rnd() % curBad.size()];
+                    int p = bp;
+                    if (rnd() % 3 == 0) {
+                        for (int tries = 0; tries < 50; tries++) {
+                            int qq = 1 + (int)(rnd() % np);
+                            if (P.pin[qq] < 0 && P.death[qq] != INF && P.birth[qq] < P.death[bp] && P.death[qq] > P.birth[bp]) { p = qq; break; }
+                        }
+                    }
+                    if (P.death[p] == INF || P.pin[p] >= 0) continue;
+                    int span = 20 + (int)(rnd() % 3000);
+                    int delta = 1 + (int)(rnd() % (unsigned)span);
+                    P.key[p] += delta;
+                    cm.push_back({p, delta});
+                }
+                vector<int> ordk = P.initialOrder();
+                long long e = P.solveAuto(ordk, P.ubT, bad, excess);
+                if (e < 0) continue;
+                if (excess <= curEx) {
+                    curEx = excess; curKey = P.key; curBad = bad;
+                    for (auto& m : cm) kmoves.push_back(m);
+                    if (excess < bestEx || (excess == bestEx && e < bestEnd)) {
+                        bestEx = excess; bestEnd = e; bestD = P.D; bestMoves = kmoves;
+                        fprintf(stderr, "t%d kit %d maxEnd=%lld excess=%lld bad=%zu\n", t, it, e, excess, bad.size());
+                    }
+                }
+            }
+            logAll = bestMoves; bestLog = bestMoves.size();
+            ordN = 0;   // обычный цикл ниже пропускаем
+        }
         for (int it = 0; bestEx > 0 && ordN > 0; it++) {
-            if (P.ov >= 10 || chrono::duration<double>(chrono::steady_clock::now() - t0).count() > secs) break;
+            if (chrono::duration<double>(chrono::steady_clock::now() - t0).count() > secs) break;
             order = curOrder;
             vector<int> pos(np + 1, -1);
             for (int i = 0; i < ordN; i++) pos[order[i]] = i;

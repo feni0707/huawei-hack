@@ -10,6 +10,7 @@
 #include <map>
 #include <set>
 #include <vector>
+#include <functional>
 
 namespace off {
 
@@ -92,8 +93,11 @@ struct Problem {
     int np = 0;
     long long peak = 0, liveEnd = 0, ubT = 0;
     // условия
+    std::vector<int> key;                 // «ключ» смерти для быстрого решателя (>= death): порядок и порог; по умолчанию = death
     std::vector<int> pin;                 // pin[pid] >= 0 — позиция зафиксирована (общий префикс с другим тестом)
     int ov = 0;                           // вариант тай-брейка начального порядка
+    int ffPre = 0;                        // трубы pid <= ffPre всегда идут по первому подходящему слева (компактно), остальные — по fitMode
+    int capPre = 0; long long capAddr = 0;   // трубы pid <= capPre желательно держать левее capAddr (только штраф в excess/bad, на раскладку не влияет)
     int capK = 16, capSlack = 40;         // первые capK труб должны лежать компактно: конец <= сумма длин первых i + capSlack
     // результат
     std::vector<int> D;
@@ -114,6 +118,7 @@ struct Problem {
         prefLen.assign(np + 1, 0);
         for (int i = 1; i <= np; i++) prefLen[i] = prefLen[i - 1] + len[i];
         pin.assign(np + 1, -1);
+        key = death;
     }
 
     // начальный порядок: по убыванию смерти; выжившие — по рождению (плотно), остальные — длинные раньше; закреплённые не входят
@@ -121,7 +126,8 @@ struct Problem {
         std::vector<int> ord;
         for (int i = 1; i <= np; i++) if (pin[i] < 0) ord.push_back(i);
         std::sort(ord.begin(), ord.end(), [&](int a, int b) {
-            if (death[a] != death[b]) return death[a] > death[b];
+            const std::vector<int>& kk = ov >= 10 ? key : death;
+            if (kk[a] != kk[b]) return kk[a] > kk[b];
             if (death[a] == INF) return birth[a] < birth[b];
             int o = ov % 10;
             if (o == 1 && birth[a] != birth[b]) return birth[a] < birth[b];
@@ -195,18 +201,31 @@ struct Problem {
             mx[i] = l;
             for (i >>= 1; i; i >>= 1) mx[i] = std::max(mx[2 * i], mx[2 * i + 1]);
         };
-        auto addRun = [&](int a, int l) { lenAt[a] = l; startAt[a + l] = a; setRun(a, l); };
-        auto delRun = [&](int a) { int l = lenAt[a]; startAt[a + l] = -1; lenAt[a] = 0; setRun(a, 0); };
+        int fitMode = ov >= 10 ? ov % 10 : 0;   // 0 — первое подходящее, 1 — наименьший подходящий пробег (слева), 2 — то же (справа)
+        std::set<std::pair<int, int>> bySz;
+        auto addRun = [&](int a, int l) { lenAt[a] = l; startAt[a + l] = a; setRun(a, l); if (fitMode) bySz.insert({l, a}); };
+        auto delRun = [&](int a) { int l = lenAt[a]; startAt[a + l] = -1; lenAt[a] = 0; setRun(a, 0); if (fitMode) bySz.erase({l, a}); };
         auto firstRun = [&](int L) {   // самый левый пробег длины >= L или -1
             if (mx[1] < L) return -1;
             int x = 1;
             while (x < TN) x = mx[2 * x] >= L ? 2 * x : 2 * x + 1;
             return x - TN;
         };
-        auto carve = [&](int a, int L) {    // вырезать [a, a+L) из пробега, содержащего a (a — его начало)
+        std::function<int(int, int, int, int, int)> rec = [&](int node, int lo, int hi, int x, int L) -> int {
+            if (hi <= x || mx[node] < L) return -1;
+            if (hi - lo == 1) return lo;
+            int mid = (lo + hi) / 2;
+            int r = rec(2 * node, lo, mid, x, L);
+            return r >= 0 ? r : rec(2 * node + 1, mid, hi, x, L);
+        };
+        auto firstRunFrom = [&](int x, int L) { return rec(1, 0, TN, x, L); };
+        auto carve = [&](int a, int L) -> int {    // вырезать L клеток из пробега, начинающегося в a; возвращает позицию
             int l = lenAt[a];
+            int pos = fitMode == 2 ? a + l - L : a;
             delRun(a);
-            if (l > L) addRun(a + L, l - L);
+            if (pos > a) addRun(a, pos - a);
+            if (pos + L < a + l) addRun(pos + L, a + l - (pos + L));
+            return pos;
         };
         auto blockCells = [&](int a, int L, int v) { for (int c = a; c < a + L; c++) { good[c] = 0; m[c] = v; } };
         D.assign(np + 1, 0);
@@ -230,6 +249,7 @@ struct Problem {
         };
         // закреплённые (по порядку pid): выжившие — обычные блоки с записью в кучу, с конечной смертью — блок навсегда (m = -1)
         int pinEnd = 0;
+        std::vector<Pin> obs;
         int firstFree = INF;
         for (int i = 1; i <= np; i++) if (pin[i] < 0) { firstFree = birth[i]; break; }
         for (int i = 1; i <= np; i++) if (pin[i] >= 0) {
@@ -238,10 +258,12 @@ struct Problem {
             maxEnd = std::max<long long>(maxEnd, a + L);
             pinEnd = std::max(pinEnd, a + L);
             // умершие до рождения первой незакреплённой трубы клетки оставляют свободными (им не с кем пересекаться)
-            int mv = death[i] == INF ? birth[i] : (death[i] > firstFree ? -1 : INF);
+            int mv = death[i] == INF ? birth[i] : INF;
+            if (death[i] != INF && death[i] > firstFree) obs.push_back({a, L, birth[i], death[i]});   // точное препятствие во времени
             for (int c = a; c < a + L; c++) { good[c] = mv == INF; m[c] = mv; }
             if (death[i] == INF) { heap.push_back({birth[i], a, L}); std::push_heap(heap.begin(), heap.end(), cmp); }
         }
+        std::sort(obs.begin(), obs.end(), [](const Pin& x, const Pin& y) { return x.a < y.a; });
         {   // пробеги из свободных клеток до pinEnd и общий хвост
             int c = 0;
             while (c < pinEnd) {
@@ -252,20 +274,52 @@ struct Problem {
         bad.clear();
         excess = 0;
         for (int p : ord) {
-            int L = len[p], d = death[p], b = birth[p];
+            int L = len[p], d = key[p], b = birth[p];
             while (!heap.empty() && heap.front().v >= d) {
                 Ent e = heap.front();
                 std::pop_heap(heap.begin(), heap.end(), cmp); heap.pop_back();
                 release(e.a, e.L, d);
             }
-            int a = firstRun(L);
-            if (a < 0) return -1;
-            carve(a, L);
+            int a;
+            if (fitMode && p > ffPre) { auto it = bySz.lower_bound({L, -1}); if (it == bySz.end()) return -1; a = it->second; }
+            else if (obs.empty()) { a = firstRun(L); if (a < 0) return -1; }
+            else {
+                int x = 0;
+                a = -1;
+                for (;;) {
+                    int sidx = firstRunFrom(x, L);
+                    if (sidx < 0) return -1;
+                    int rl = lenAt[sidx], c = sidx;
+                    while (c + L <= sidx + rl) {
+                        int bump = c;
+                        size_t lo = std::lower_bound(obs.begin(), obs.end(), c - 39, [](const Pin& o, int v) { return o.a < v; }) - obs.begin();
+                        for (size_t k = lo; k < obs.size() && obs[k].a < c + L; k++) {
+                            const Pin& o = obs[k];
+                            if (o.a + o.L > c && o.b < d && o.d > b) bump = std::max(bump, o.a + o.L);
+                        }
+                        if (bump == c) break;
+                        c = bump;
+                    }
+                    if (c + L <= sidx + rl) { a = c; break; }
+                    x = sidx + rl;
+                }
+                // вырезать [a, a+L) из пробега, содержащего a
+                int s0 = a;
+                while (s0 > 0 && lenAt[s0] == 0) s0--;
+                int rl = lenAt[s0];
+                delRun(s0);
+                if (a > s0) addRun(s0, a - s0);
+                if (a + L < s0 + rl) addRun(a + L, s0 + rl - (a + L));
+                goto placed;
+            }
+            a = carve(a, L);
+            placed:
             blockCells(a, L, b);
             heap.push_back({b, a, L}); std::push_heap(heap.begin(), heap.end(), cmp);
             D[p] = a;
             maxEnd = std::max<long long>(maxEnd, a + L);
             if (a + L > target) { bad.push_back(p); excess += a + L - target; }
+            else if (p <= capPre && a + L > capAddr) { bad.push_back(p); excess += a + L - capAddr; }
         }
         return maxEnd;
     }
@@ -273,6 +327,26 @@ struct Problem {
         return ov >= 10 ? solveFast(ord, target, bad, excess) : solve(ord, target, bad, excess);
     }
 };
+
+
+// Совместная раскладка общего префикса тестов A и B: выжившие трубы префикса теста A, которые умирают в тесте B (cmdsB),
+// собираются в отдельный блок сразу за остальными выжившими префикса (ключ INF-1), а поздние выжившие идут после (INF-2).
+inline long long jointHost = 6000;   // суммарная длина «хозяев»: самых поздних выживших, на чьи клетки (внизу) во времени встают поздно умирающие трубы префикса
+inline void applyJoint(Problem& P, const std::vector<int>& cmdsB, int prefixCmds) {
+    Problem Q;
+    Q.load(cmdsB);
+    int pre = 0;
+    for (int i = 0; i < prefixCmds && i < (int)P.cmds.size(); i++) if (P.cmds[i] > 0) pre++;
+    P.ffPre = pre;
+    long long acc = 0;
+    std::vector<char> host(P.np + 1, 0);
+    for (int pid = P.np; pid > pre && acc < jointHost; pid--) if (P.death[pid] == INF) { host[pid] = 1; acc += P.len[pid]; }
+    for (int pid = 1; pid <= P.np; pid++) {
+        if (P.death[pid] != INF) continue;
+        if (pid <= pre) { if (pid <= Q.np && Q.death[pid] != INF) P.key[pid] = INF - 1; }
+        else P.key[pid] = host[pid] ? INF - 2 : INF - 3;
+    }
+}
 
 }  // namespace off
 #endif
