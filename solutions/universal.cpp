@@ -336,6 +336,8 @@ struct Engine {
 
     // ------------------------------------------------------------------ удаление
     ll remove(int pid) {
+        // защита от несуществующего PID (по условию такого быть не может, но лучше не читать за границей)
+        if (pid <= 0 || pid >= (int)pos.size() || pos[pid] < 0) return 0;
         ll p = pos[pid];
         ll len = plen[pid];
         int aid = parena[pid];
