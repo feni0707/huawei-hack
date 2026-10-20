@@ -292,6 +292,9 @@ struct Engine {
     bool blockOpen(int L, int c) {
         Arena& A = ar[L][c];
         int capCells = std::max(20, (int)K[5]);
+        // рост блока по ходу серии: длинная серия получает крупные блоки (жертвы собираются в один кусок),
+        // короткая остаётся на мелких. K[8] — верхняя граница роста (0 = не расти).
+        if (K[8] > 0) capCells = std::min(std::max(capCells, (int)K[8]), capCells << std::min(3, A.blocks / 2));
         int maxSlots = std::max(1, (int)K[6]);
         int slots = std::max(1, std::min(maxSlots, capCells / L));
         int tag = nextTag++;
