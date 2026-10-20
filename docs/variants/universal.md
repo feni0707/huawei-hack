@@ -3,7 +3,7 @@
 - **Владелец:** агент (ветка `agent/universal` от `feni/scorefit`). **Файл:** `solutions/universal.cpp` (standalone, C++17).
 - **Стенд:** `scripts/sim2.cpp` + `scripts/simrun.py` (in-process, проверка как в `interactor.cpp`), `scripts/winbench.py`
   (Windows-порт `bench.py`: настоящий интерактор, CPU через `GetProcessTimes`).
-- **Статус на момент написания:** open **29.2818 / 32.1** (scorefit 30.1539, naive 4.9129), WA/TL = 0;
+- **Статус на момент написания:** open **29.3007 / 32.1** (scorefit 30.1539, naive 4.9129), WA/TL = 0;
   на 20 классах `build/robust` средний KPI **0.8383** (scorefit 0.8473). Ниже — где выигрываем и где проигрываем.
 - **Ресурсы (настоящий интерактор, Windows):** пик памяти 20.5 МБ на `build/gen/stress/1.in` (200 000 труб по 40 м),
   11.2 МБ на 15. CPU в одинаковых условиях (-j 8, open): universal 4.73 с на 15 (Σ 6.70), naive 4.31 (Σ 6.41),
