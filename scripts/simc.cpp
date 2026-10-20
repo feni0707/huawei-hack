@@ -12,7 +12,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
-std::vector<int> ORD; long long CUR = 0;
+std::vector<int> ORD; long long CUR = 0, NCMD = 0;
 double K[64]; // ручки экспериментов: env K="i=v i=v"
 #define main sf_main_unused
 #include SFSRC
@@ -39,14 +39,16 @@ int main(int argc, char** argv) {
         double w; std::vector<int> cmd = readTest(argv[a], w);
         Alloc* A = new Alloc();
         ORD.assign(1, 0); { for (size_t i = 0; i < cmd.size(); i++) { if (cmd[i] > 0) ORD.push_back(1 << 30); else if (cmd[i] < 0) ORD[-cmd[i]] = (int)i; } }
+        FILE* frontF = getenv("FRONT") ? fopen(getenv("FRONT"), "w") : nullptr; long long frontStep = getenv("FRONTSTEP") ? atoll(getenv("FRONTSTEP")) : 100;
         std::vector<int> cells; std::vector<int> plen(1, 0); std::vector<char> ever; std::vector<int> freedAt; std::vector<int> lastl;
         unsigned long long hsh = 1469598103934665603ULL;   // FNV-хеш всех ответов (сверка «ответы не изменились»)
         ll occ = 0; bool ok = true; double cutSum = 0; int cutCnt = 0;
         long long n = cmd.size();
         for (long long ci = 0; ci < n && ok; ci++) {
-            int c = cmd[ci]; CUR = ci;
+            int c = cmd[ci]; CUR = ci; NCMD = (long long)cmd.size();
             if (c == 0) break;
             if (ci == dumpCi) { FILE* f = fopen(getenv("DUMPF"), "w"); for (size_t i = 0; i < cells.size(); i++) fprintf(f, "%d\n", cells[i]); fclose(f); }
+            if (frontF && ci % frontStep == 0) fprintf(frontF, "%lld %lld %lld %d\n", ci, (ll)cells.size(), occ, (int)A->tailStart());
             if (ncut > 1 && ci > 0) { long long lo = n - n / 10, st = std::max(1LL, n / 10 / ncut); if (ci >= lo && (ci - lo) % st == 0 && !cells.empty()) { cutSum += (double)occ / cells.size(); cutCnt++; } }
             if (c > 0) {
                 ll N, D; A->place(c, N, D);
@@ -88,6 +90,7 @@ int main(int argc, char** argv) {
             printf("\n");
             if (getenv("NEVSEG")) { size_t i = 0; printf("NEV:"); while (i < e) { if (cells[i] || ever[i]) { i++; continue; } size_t j = i; while (j < e && !cells[j] && !ever[j]) j++; printf(" %zu+%zu", i, j - i); i = j; } printf(" T=%zu\n", cells.size()); }
         }
+        if (frontF) fclose(frontF);
         printf("%s w=%g kpi=%.6f T=%zu h=%016llx%s\n", argv[a], w, kpi, cells.size(), hsh, ok ? "" : " WA");
         fflush(stdout);
         delete A;
