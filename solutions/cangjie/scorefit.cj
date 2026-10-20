@@ -1,8 +1,11 @@
 // scorefit — порт solutions/scorefit.cpp на Cangjie (仓颉) 1.0.
 //
-// !!! ЧЕРНОВИК: НЕ КОМПИЛИРОВАЛСЯ (в окружении автора нет cjc). Написан по документации 1.0.0
-// (std.env ConsoleReader/ConsoleWriter, Array(n, repeat:), Int64.parse из std.convert).
-// Перед посылкой: собрать `cjc scorefit.cj -O2 -o scorefit`, затем сравнить ответы с C++-версией:
+// Проверено на cjc 1.0.5 (2026-10-20): компилируется без предупреждений, ответы побитово = C++-версии из
+// коммита 5d99f4b (порт соответствует ей, а НЕ текущей solutions/scorefit.cpp) на 46 тестах, через интерактор
+// 0 WA/TL; худший случай (200 тыс. труб по 40 м) — 0.5 с, 113 МБ.
+// Сборка на macOS: `source build/cangjie-sdk/cangjie/envsetup.sh`, затем
+//   SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk cjc -O2 scorefit.cj -o scorefit
+// (lld из SDK не читает MacOSX26.sdk). Сравнить ответы с C++-версией:
 //   for f in materials/tests/*.in; do tail -n +2 $f > /tmp/c.txt; ./scorefit < /tmp/c.txt > /tmp/a.txt;
 //     build/bin/scorefit < /tmp/c.txt > /tmp/b.txt; cmp /tmp/a.txt /tmp/b.txt || echo DIFF $f; done
 // Ответы должны совпадать побитово (логика и порядок операций с плавающей точкой — как в C++).
