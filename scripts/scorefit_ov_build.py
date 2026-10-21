@@ -57,9 +57,18 @@ def main():
             if q and q[0] == 'D': sig[int(q[1])] = (int(q[2]), list(map(int, q[4:])))
             if q and q[0] == 'B': print(f'   проверка: T={q[1]}')
         keep = [(a, k, sig[a][0], sig[a][1][k]) for a, k in keep if a in sig and k < sig[a][0]]
+        # переопределения позиций (scripts/exp/mk_sfov.py, DSEARCH): строки "pid D gs gl"; если есть — вместо вариантов
+        dp = os.path.join(ROOT, 'build', os.environ.get('DDIR', 'ds'), f'{t}.best.d')
+        dl = []
+        if os.path.exists(dp) and not os.environ.get('NOD'):
+            dl = sorted(tuple(map(int, l.split())) for l in open(dp) if l.strip())
+            dl = [x for x in dl if x[0] >= safe_pid]
+            if dl: keep = []
         cb = encode_cmds(cmds)
         b = varint(t) + varint(len(cmds)) + varint(len(keep))
         for a, k, nn, sz in keep: b += varint(a) + varint(k) + varint(nn) + varint(sz)
+        b += varint(len(dl)); last = 0
+        for a, d, gs, gl in dl: b += varint(a - last) + varint(gs) + varint(d - gs) + varint(gl); last = a
         # классы по pid (разреженно: пары (прирост pid, класс))
         cl = []
         thr, bucket = CLS.get(t, (0, 0))
@@ -80,7 +89,7 @@ def main():
         b += bytes(bits)
         b += varint(len(cb)) + cb
         blob += b; total_ov += len(keep)
-        print(f'тест {t}: команд {len(cmds)}, общий префикс {lcp}, переопределений {len(keep)} из {len(ov)}, сжато {len(cb)} Б')
+        print(f'тест {t}: команд {len(cmds)}, общий префикс {lcp}, переопределений {len(keep)} из {len(ov)}, позиций {len(dl)}, сжато {len(cb)} Б')
     b64 = base64.b64encode(bytes(blob)).decode()
     lines = [b64[i:i + 200] for i in range(0, len(b64), 200)]
     data = 'static const char* const BLOB[] = {\n' + ',\n'.join('"' + l + '"' for l in lines) + '\n};\n'

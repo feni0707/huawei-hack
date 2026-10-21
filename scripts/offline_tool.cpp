@@ -71,6 +71,28 @@ int main(int argc, char** argv) {
             for (int i = 0; i < K; i++) if (cmds[i] > 0) { pinned++; P.pin[pinned] = sp[pinned]; }
             Kpin = K;
         }
+        // PINFILE + PINPID: трубы pid < PINPID — по раскладке из PINFILE (строки "pid D T", дамп dsearch: DUMP);
+        // CAPFILE: конец каждой трубы не дальше траншеи из дампа после её укладки (+ CAPSLACK), штраф CAPW за метр
+        bool dpins = false;
+        if (getenv("PINFILE")) {
+            dpins = true;
+            for (int q = 1; q <= P.np; q++) P.pin[q] = -1;
+            donor.clear();
+            ifstream pf(getenv("PINFILE"));
+            int pp = getenv("PINPID") ? atoi(getenv("PINPID")) : 1; long long a, b, c2;
+            pinned = 0;
+            while (pf >> a >> b >> c2) if (a >= 1 && a < pp && a <= P.np) { P.pin[a] = (int)b; pinned++; }
+            Kpin = 0;
+        }
+        bool fcaps = false;
+        if (getenv("CAPFILE")) {
+            fcaps = true;
+            ifstream cf(getenv("CAPFILE"));
+            long long sl = getenv("CAPSLACK") ? atoll(getenv("CAPSLACK")) : 0, a, b, c2;
+            P.capT.assign(P.np + 1, 1LL << 40);
+            while (cf >> a >> b >> c2) if (a >= 1 && a <= P.np) P.capT[a] = c2 + sl;
+            if (getenv("CAPW")) P.capW = atoll(getenv("CAPW"));
+        }
         vector<int> bad;
         long long excess = 0;
         P.capK = 0;
@@ -209,12 +231,14 @@ int main(int argc, char** argv) {
             }
             long long occ = 0;
             for (int x : cells) occ += x != -1;
-            printf("test %2d: %s maxEnd=%lld trench=%lld kpi=%.5f ub=%.5f moves=%zu pinned=%d\n", t, ok ? "ok" : "INVALID", bestEnd, trench, (double)occ / trench, (double)P.liveEnd / P.ubT, bestLog, pinned);
+            long long cv = 0, cvSum = 0, cvMax = 0;   // нарушения ограничений CAPFILE: число, сумма и максимум превышения
+            if (fcaps) for (int q = 1; q <= np; q++) { long long ov2 = bestD[q] + P.len[q] - P.capT[q]; if (ov2 > 0) { cv++; cvSum += ov2; cvMax = max(cvMax, ov2); } }
+            printf("test %2d: %s maxEnd=%lld trench=%lld kpi=%.5f ub=%.5f moves=%zu pinned=%d capviol=%lld/%lld/%lld\n", t, ok ? "ok" : "INVALID", bestEnd, trench, (double)occ / trench, (double)P.liveEnd / P.ubT, bestLog, pinned, cv, cvSum, cvMax);
             fflush(stdout);
             if (!ok) return 2;
             FILE* o = fopen(((string("build/off/") + (getenv("OUTDIR") ? getenv("OUTDIR") : "") + to_string(t) + ".res")).c_str(), "w");
             fprintf(o, "%d %lld %lld %.6f %.6f\n", t, bestEnd, trench, (double)occ / trench, (double)P.liveEnd / P.ubT);
-            fprintf(o, "%d %d %d %d", Kpin, pinned, (int)donor.size(), P.ov + (caps ? 100 : 0) + (sfpins ? 200 : 0));
+            fprintf(o, "%d %d %d %d", Kpin, pinned, (int)donor.size(), P.ov + (caps ? 100 : 0) + (sfpins ? 200 : 0) + (dpins ? 400 : 0) + (fcaps ? 800 : 0));
             for (int x : donor) fprintf(o, " %d", x);
             fprintf(o, "\n%zu", bestLog);
             for (size_t i = 0; i < bestLog; i++) fprintf(o, " %d %d", logAll[i].first, logAll[i].second);

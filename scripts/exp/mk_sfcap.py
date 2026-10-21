@@ -42,7 +42,11 @@ assert old in s
 s = s.replace(old, '                if (st >= 0 && chunk - tl > need) need = chunk - tl;\n                if (st >= 0 && need > L - tl) { ll cr = capRes(need + tl, L) - tl; if (cr < L - tl) cr = L - tl; need = (int)cr; }', 1)
 old = '            ll C = (ll)ZSLOTS * L;'
 assert old in s
-s = s.replace(old, '            ll C = (ll)ZSLOTS * L;\n            { ll cr = capRes(C, L); cr = cr / L * L; if (cr < L) cr = L; C = cr; }', 1)
+s = s.replace(old, '            ll C = (ll)ZSLOTS * L;\n            { ll cr = capZ() > 0 ? capZone(C, L) : capRes(C, L); cr = cr / L * L; if (cr < L) cr = L; C = cr; }', 1)
+s = s.replace('    // ---- тень без потоков', '    ll capZone(ll want, int L) const {   // зоны по длинам: не больше max(2L, CAPZ·T) независимо от серии\n        ll c = (ll)(capZ() * (double)T); if (c < 2 * L) c = 2 * L; return c < want ? c : want;\n    }\n    // ---- тень без потоков', 1)
+s = s.replace('static int capR() { static int v', 'static double capZ() { static double v = getenv("CAPZ") ? atof(getenv("CAPZ")) : CAPZ_DEF; return v; }\nstatic int capR() { static int v', 1)
+s = s.replace('static int capR() { return CAPR_DEF; }', 'static int capR() { return CAPR_DEF; }\nstatic double capZ() { return CAPZ_DEF; }', 1)
+s = s.replace('#ifndef CAPR_DEF', '#ifndef CAPZ_DEF\n#define CAPZ_DEF 0.0\n#endif\n#ifndef CAPR_DEF', 1)
 
 s = s.replace('static const int CHUNK_MIN = 200, CHUNK_PER_L = 10;', 'static int CHUNK_MIN = 200, CHUNK_PER_L = 10;', 1)
 s = s.replace('static const int CHUNK_LOW = 40, CHUNK_LOW_AGE = 1000;', 'static int CHUNK_LOW = 40, CHUNK_LOW_AGE = 1000;', 1)

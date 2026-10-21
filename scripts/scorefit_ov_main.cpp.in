@@ -14,7 +14,7 @@ struct Dec {   // range coder (как LZMA rc)
     inline int direct(int nbits) { int v = 0; for (int k = 0; k < nbits; k++) { rng >>= 1; int b = code >= rng; if (b) code -= rng; v = (v << 1) | b; norm(); } return v; }
     int tree(unsigned short* pr, int nbits, int shift) { int m = 1; for (int k = 0; k < nbits; k++) m = (m << 1) | bit(pr + m, shift); return m - (1 << nbits); }
 };
-struct TestInfo { int n = 0; std::vector<int> cmds; std::vector<std::pair<int, int>> ov; std::vector<std::array<int, 3>> sig; std::vector<unsigned char> cls; };
+struct TestInfo { int n = 0; std::vector<int> cmds; std::vector<std::pair<int, int>> ov; std::vector<std::array<int, 3>> sig; std::vector<std::array<int, 4>> ovd; std::vector<unsigned char> cls; };
 static std::vector<TestInfo> TI;
 static int rd(const unsigned char*& p) { int x = 0, sh = 0; for (;;) { int b = *p++; x |= (b & 0x7F) << sh; if (!(b & 0x80)) return x; sh += 7; } }
 static void decodeCmds(const unsigned char* data, int n, std::vector<int>& cmds) {
@@ -59,6 +59,7 @@ static void loadData() {
     while (p < end) {
         TestInfo T; rd(p); T.n = rd(p);
         int m = rd(p); for (int i = 0; i < m; i++) { int a = rd(p), b = rd(p), nn = rd(p), sz = rd(p); T.ov.push_back({a, b}); T.sig.push_back({a, nn, sz}); }
+        int md = rd(p); { int pid = 0; for (int i = 0; i < md; i++) { pid += rd(p); int gs = rd(p), d = gs + rd(p), gl = rd(p); T.ovd.push_back({pid, d, gs, gl}); } }
         int nc = rd(p); { int pid = 0; for (int k = 0; k < nc; k++) { pid += rd(p); int v = rd(p); if ((int)T.cls.size() <= pid) T.cls.resize(pid + 1, 0); T.cls[pid] = (unsigned char)v; } }
         int cl = rd(p); decodeCmds(p, T.n, T.cmds); p += cl;
         TI.push_back(T);
@@ -81,7 +82,11 @@ int main() {
             for (int t : alive) if (i < ovd::TI[t].n && ovd::TI[t].cmds[i] == c) na.push_back(t);
             alive.swap(na);
             int want = alive.size() == 1 ? alive[0] : -1;
-            if (want != cur) { cur = want; if (cur >= 0) { gOv = ovd::TI[cur].ov; gOvSig = ovd::TI[cur].sig; } else { gOv.clear(); gOvSig.clear(); } gForcePid = -1; gForceIdx = -1; }
+            if (want != cur) {
+                cur = want;
+                if (cur >= 0) { gOv = ovd::TI[cur].ov; gOvSig = ovd::TI[cur].sig; gOvD = ovd::TI[cur].ovd; } else { gOv.clear(); gOvSig.clear(); gOvD.clear(); }
+                gForcePid = -1; gForceIdx = -1; A->forceD = -1;
+            }
         }
         int n;
         if (c > 0) {
