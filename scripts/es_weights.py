@@ -8,7 +8,7 @@ TAG=args[0]; GENS=int(args[1]); rest=args[2:]
 if '--' in rest: i=rest.index('--'); tr=rest[:i]; va=rest[i+1:]
 else: tr=rest; va=[]
 TRAIN=sorted(sum([glob.glob(g) for g in tr],[])); VAL=sorted(sum([glob.glob(g) for g in va],[]))
-exe=os.path.abspath('build/bin/lab.exe')
+exe=os.path.abspath(os.environ.get('EXE','build/bin/lab.exe'))
 BASE=[float(x) for x in "1 -38.8 -22.4 13.5 47 -203 107 -7.25 2.78 2.26 -8.96 23.4 1.05e+03 69 0 46.7 27.9 50 0 0 0 0 0 0 0 20 50".split()]
 if os.environ.get('W0'): BASE=[float(x) for x in os.environ['W0'].split()]
 SC=[0,5,5,2,5,50,50,5,2,5,2,5,200,50,0,5,3,3,50,50,0,0,5,5,200,5,30]
@@ -19,7 +19,7 @@ def tow(x):
     for k,i in enumerate(IDX): w[i]=BASE[i]+SC[i]*x[k]
     return ','.join(f'{v:.6g}' for v in w)
 def evalfiles(sfw,files):
-    env=dict(os.environ); env['SFW']=sfw
+    env=dict(os.environ); env[os.environ.get('VAR','SFW')]=sfw
     if 'SF' in os.environ: env['SF']=os.environ['SF']
     out=subprocess.run([exe]+files,capture_output=True,text=True,env=env).stdout
     r={}
@@ -27,9 +27,22 @@ def evalfiles(sfw,files):
         t=l.split()
         if len(t)>=3 and t[1].startswith('w=') and t[2].startswith('kpi='): r[t[0]]=float(t[2][4:])
     return r
+GW={'tests':float(os.environ.get('WOPEN','5'))}
 def score(sfw,files):
-    r=evalfiles(sfw,files)
-    return sum(r.get(f,0.0) for f in files)/len(files), r
+    # среднее по группам (родительская папка), открытые тесты — Σw·KPI/Σw с весом группы WOPEN
+    chunks=[files[i::int(os.environ.get('CHUNKS','1'))] for i in range(int(os.environ.get('CHUNKS','1')))]
+    r={}
+    for ch in chunks: r.update(evalfiles(sfw,ch))
+    g={}
+    for f in files:
+        k=os.path.basename(os.path.dirname(f)); g.setdefault(k,[]).append(f)
+    tot=0; wt=0
+    for k,fs in g.items():
+        if k=='tests':
+            ws=[float(open(f).read(30).split()[0]) for f in fs]; m=sum(w*r.get(f,0.0) for w,f in zip(ws,fs))/sum(ws)
+        else: m=sum(r.get(f,0.0) for f in fs)/len(fs)
+        w=GW.get(k,1.0); tot+=w*m; wt+=w
+    return tot/wt, r
 lam=int(os.environ.get('LAM','16')); mu=lam//2
 w=[math.log(mu+0.5)-math.log(i+1) for i in range(mu)]; sw=sum(w); w=[x/sw for x in w]; mueff=1/sum(x*x for x in w)
 cs=(mueff+2)/(n+mueff+5); damps=1+2*max(0,math.sqrt((mueff-1)/(n+1))-1)+cs
