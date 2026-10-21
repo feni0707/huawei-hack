@@ -74,14 +74,14 @@ UB достигается только глобальной офлайн-рас�
 Наборы: open 1–15; 6 «остаточных» тестов `build/residual/res` (префикс открытого теста + массовое удаление + трубы 20/40,
 UB = 1.0 — ловушка для решений, которые узнают открытые тесты); 190 «общих» тестов `gen_general.py --seed 7` (из `feni/hybrid`).
 
-| решение (ветка) | open Σw | residual avg | general avg | max CPU, open 15 (-j 1) | замечания |
+| решение (ветка) | open Σw | residual avg | general avg | max CPU на open (Windows; -j 1, где не указано) | замечания |
 |---|---|---|---|---|---|
 | `scorefit.cpp` (feni/scorefit) | 30.154 | 0.9997 | 0.6773 | 2.2 с | лучший честный |
-| `scorefit_guards.cpp` (feni/hybrid) | 30.154 | 0.9997 | 0.6773 | ≈ scorefit | на моих наборах = scorefit (kv_update −0.16 %) |
+| `scorefit_guards.cpp` (feni/hybrid) | 30.154 | 0.9997 | 0.6773 | 3.2 с (-j 3) | на моих наборах = scorefit (kv_update −0.16 %) |
 | `hybrid.cpp` (feni/hybrid, вшитые открытые) | 30.208 | 0.9823 | — | **19.9 с** | риск TL; тест 9 = 0.517; на residual 12-p188 = 0.933 |
-| `universal.cpp` (agent/universal) | 29.301 | 0.9791 | 0.6683 | 2.4 с | 8-p402 = 0.900 |
+| `universal.cpp` (agent/universal) | 29.301 | 0.9791 | 0.6683 | 2.4 с (-j 3) | 8-p402 = 0.900 |
 | `portfolio.cpp` (claude/portfolio) | 29.607 | 0.9967 | 0.6707 | 2.7 с | |
-| `overfit.cpp` (claude/portfolio, вшитые открытые) | 30.743 | **0.6272** | — | 2.9 с | 13-p7 = 0.20, 12-p188 = 0.17 — вшитые позиции ломаются на чужом продолжении |
+| `overfit.cpp` (claude/portfolio, вшитые открытые) | 30.743 | **0.6272** | — | 3.6 с | 13-p7 = 0.20, 12-p188 = 0.17 — вшитые позиции ломаются на чужом продолжении |
 | `sfgov.cpp` (scripts/exp, тени с 3 наборами весов) | 30.152 | 0.9997 | 0.6776 | ×2.5 CPU | +0.03 % не стоит CPU |
 | `bestfit.cpp` (claude/ensemble) | 28.367 | **1.0000** | 0.6741 | 2.3 с | best fit лучше scorefit на steady +1.2 %, lifetime +0.5 % |
 
