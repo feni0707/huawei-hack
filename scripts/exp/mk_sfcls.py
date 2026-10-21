@@ -11,7 +11,7 @@ def rep(old, new, cnt=1):
     assert old in s, old[:80]
     s = s.replace(old, new, cnt)
 rep('    std::vector<int> slots[MAXL + 1];    // свободные слоты участков длины L (стек)',
-    '    std::vector<int> slots[8 * 64];      // свободные слоты участков: ключ = длина + 64·класс (стек)\n    int zCls = 0, zKey = 0;              // класс текущей трубы (задаётся снаружи) и ключ её зоны')
+    '    std::vector<int> slots[16 * 64];     // свободные слоты участков: ключ = длина + 64·класс (стек), класс < 16\n    int zCls = 0, zKey = 0;              // класс текущей трубы (задаётся снаружи) и ключ её зоны')
 rep('    bool zoneOn(int z, bool en) const { return en && z > 0 && cnt[z] > ZSHARE * cntTot; }',
     '    bool zoneOn(int z, bool en) const { return en && z > 0 && cnt[z & 63] > ZSHARE * cntTot; }')
 rep('        for (int x = d; x < d + n; x++) { int z = zl.get(x); if (z && z != L && zoneOn(z, en)) return false; }',

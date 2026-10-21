@@ -34,7 +34,7 @@ static void cfInit() {
 ''' % NF
 i = s.index('typedef long long ll;')
 s = s[:i] + '#include <cstdlib>\n#include <cmath>\n#include <vector>\n' + s[i:]
-i = s.index('static const double LW[27]')
+i = s.index('double LW[27] = {'); i = s.rindex('\n', 0, i) + 1   # начало строки (LW может быть и не const — mk_sfkn.py)
 s = s[:i] + glob + s[i:]
 
 # признаки кандидата (вне потоков) — функция рядом с gapCost

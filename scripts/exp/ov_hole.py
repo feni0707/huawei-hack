@@ -4,13 +4,13 @@
 с которого каждая свободна непрерывно (t_h) -> кандидаты: трубы, рождённые в (t_h, te], живые в te, не длиннее дыры
 (сначала легшие в хвост, длинные раньше), позиции — края дыры -> оценка параллельно (dsearch, CANDD) -> лучший строго
 улучшающий (T, emax, площадь над THR) принимается и дописывается в cur.d. Классы и THR — через env, как у dsearch.
-Нужен build/bin/dsearch3.exe (или env DSEXE)."""
+Нужен build/bin/dsearch4.exe (или env DSEXE); ручки — KNFILE/KNFROM."""
 import os, sys, subprocess, tempfile, heapq, time, concurrent.futures as cf
 args = sys.argv[1:]
 test, curp = args[0], args[1]
 def opt(n, d): return type(d)(args[args.index(n) + 1]) if n in args else d
 MINPID = opt('--minpid', 1); J = opt('-j', 8); R = opt('--rounds', 1000); PERHOLE = opt('--perhole', 3); MAXC = opt('--maxc', 400)
-exe = os.path.abspath(os.environ.get('DSEXE', 'build/bin/dsearch3.exe'))
+exe = os.path.abspath(os.environ.get('DSEXE', 'build/bin/dsearch4.exe'))
 tmp = tempfile.mkdtemp()
 tok = open(test).read().split(); n = int(tok[1]); cmds = list(map(int, tok[2:2 + n]))
 L = [0]; birth = [0]; death = [1 << 30]

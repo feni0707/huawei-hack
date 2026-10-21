@@ -14,9 +14,10 @@ struct Dec {   // range coder (как LZMA rc)
     inline int direct(int nbits) { int v = 0; for (int k = 0; k < nbits; k++) { rng >>= 1; int b = code >= rng; if (b) code -= rng; v = (v << 1) | b; norm(); } return v; }
     int tree(unsigned short* pr, int nbits, int shift) { int m = 1; for (int k = 0; k < nbits; k++) m = (m << 1) | bit(pr + m, shift); return m - (1 << nbits); }
 };
-struct TestInfo { int n = 0; std::vector<int> cmds; std::vector<std::pair<int, int>> ov; std::vector<std::array<int, 3>> sig; std::vector<std::array<int, 4>> ovd; std::vector<unsigned char> cls; };
+struct TestInfo { int n = 0; std::vector<int> cmds; std::vector<std::pair<int, int>> ov; std::vector<std::array<int, 3>> sig; std::vector<std::array<int, 4>> ovd; std::vector<unsigned char> cls; std::vector<std::pair<int, long long>> kn; };
 static std::vector<TestInfo> TI;
 static int rd(const unsigned char*& p) { int x = 0, sh = 0; for (;;) { int b = *p++; x |= (b & 0x7F) << sh; if (!(b & 0x80)) return x; sh += 7; } }
+static long long rd64(const unsigned char*& p) { long long x = 0; int sh = 0; for (;;) { int b = *p++; x |= (long long)(b & 0x7F) << sh; if (!(b & 0x80)) return x; sh += 7; } }
 static void decodeCmds(const unsigned char* data, int n, std::vector<int>& cmds) {
     int maxp = n + 2; std::vector<int> bitT(maxp + 1, 0);
     int cnt = 0, pid = 0, prev = 0, lg = 1; while ((1 << lg) <= maxp) lg++;
@@ -60,6 +61,7 @@ static void loadData() {
         TestInfo T; rd(p); T.n = rd(p);
         int m = rd(p); for (int i = 0; i < m; i++) { int a = rd(p), b = rd(p), nn = rd(p), sz = rd(p); T.ov.push_back({a, b}); T.sig.push_back({a, nn, sz}); }
         int md = rd(p); { int pid = 0; for (int i = 0; i < md; i++) { pid += rd(p); int gs = rd(p), d = gs + rd(p), gl = rd(p); T.ovd.push_back({pid, d, gs, gl}); } }
+        int mk = rd(p); for (int i = 0; i < mk; i++) { int k = rd(p); long long z = rd64(p); T.kn.push_back({k, (z >> 1) ^ -(z & 1)}); }
         int nc = rd(p); { int pid = 0; for (int k = 0; k < nc; k++) { pid += rd(p); int v = rd(p); if ((int)T.cls.size() <= pid) T.cls.resize(pid + 1, 0); T.cls[pid] = (unsigned char)v; } }
         int cl = rd(p); decodeCmds(p, T.n, T.cmds); p += cl;
         TI.push_back(T);
@@ -86,6 +88,10 @@ int main() {
                 cur = want;
                 if (cur >= 0) { gOv = ovd::TI[cur].ov; gOvSig = ovd::TI[cur].sig; gOvD = ovd::TI[cur].ovd; } else { gOv.clear(); gOvSig.clear(); gOvD.clear(); }
                 gForcePid = -1; gForceIdx = -1; A->forceD = -1;
+                // ручки движка: свои у узнанного теста, иначе значения по умолчанию
+                double v[NKN]; for (int k = 0; k < NKN; k++) v[k] = KN_DEF[k];
+                if (cur >= 0) for (auto& q : ovd::TI[cur].kn) if (q.first >= 0 && q.first < NKN) v[q.first] = (double)q.second / 1e4;
+                knSet(v);
             }
         }
         int n;

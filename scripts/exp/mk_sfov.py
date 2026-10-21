@@ -138,14 +138,23 @@ static int gProbeD = -1, gProbeGs = 0, gProbeGl = 0; static bool gProbeFail = fa
 struct DRes { ll T = 0, emax = 0; double area = 0, area2 = 0; size_t te = 0; bool operator<(const DRes& o) const { if (T != o.T) return T < o.T; if (emax != o.emax) return emax < o.emax; if (area < o.area - 1e-9) return true; if (area > o.area + 1e-9) return false; return gArea2 && area2 < o.area2 - 1e-9; } };
 static std::mt19937_64 drng;
 static ll gThr = 0; static bool gTrace = false; static long long gVerb = 0;
+static double gKn[NKN]; static long long gKnFrom = -1;   // KNFILE/KNFROM: ручки теста и команда, с которой они действуют
+static void loadKn() {
+    for (int k = 0; k < NKN; k++) gKn[k] = KN_DEF[k];
+    if (!getenv("KNFILE")) return;
+    FILE* f = fopen(getenv("KNFILE"), "r"); int a; long long q; while (f && fscanf(f, "%d %lld", &a, &q) == 2) if (a >= 0 && a < NKN) gKn[a] = (double)q / 1e4; if (f) fclose(f);
+    gKnFrom = getenv("KNFROM") ? atoll(getenv("KNFROM")) : 0;
+}
 static std::vector<int> gPlan; static std::vector<std::array<int, 4>> gPlanCap; static FILE* gDump = 0;   // PLAN: позиции по pid (-1 — нет); DUMP: "pid D T"   // площадь считается над порогом THR (по умолчанию 0)
 // probe >= 0: перед укладкой трубы probe выбрать позицию и поставить переопределение (в gOvD); cap — для записи
 // подписей всех укладок с pid из capSet (перевод вариантов в позиции); applied[k] — переопределение k сработало
 static DRes runD(const std::vector<int>& c, int probe, std::vector<char>* applied, const std::vector<int>* capSet, std::vector<std::array<int, 4>>* capOut) {
+    knSet(KN_DEF);
     Alloc* A = new Alloc(); DRes r;
     if (applied) applied->assign(gOvD.size(), 0);
     for (size_t i = 0; i < c.size(); i++) {
         int x = c[i]; if (x == 0) break;
+        if ((long long)i == gKnFrom) knSet(gKn);
 #ifdef OVCLS
         CUR = (long long)i;
 #endif
@@ -221,6 +230,14 @@ int main(int argc, char** argv) {
     int minpid = getenv("MINPID") ? atoi(getenv("MINPID")) : 1;
     gThr = getenv("THR") ? atoll(getenv("THR")) : 0; gVerb = getenv("VERB") ? atoll(getenv("VERB")) : 0;
     double secs = getenv("SECS") ? atof(getenv("SECS")) : 600;
+    loadKn();
+    if (getenv("KNDEF")) { for (int k = 0; k < NKN; k++) printf("%d %.6g\n", k, KN_DEF[k]); return 0; }
+    if (getenv("KNEVAL")) {
+        if (getenv("DFILE")) { FILE* f = fopen(getenv("DFILE"), "r"); int a, b, g1, g2; while (f && fscanf(f, "%d %d %d %d", &a, &b, &g1, &g2) == 4) gOvD.push_back({a, b, g1, g2}); if (f) fclose(f); std::sort(gOvD.begin(), gOvD.end()); }
+        DRes r = runD(c, -1, 0, 0, 0);
+        printf("K %lld %lld %.0f %.0f\n", r.T, r.emax, r.area, r.area2);
+        return 0;
+    }
     drng.seed(getenv("SEED") ? atoll(getenv("SEED")) : 1);
     int P = 0; for (int x : c) if (x > 0) P++;
     if (getenv("OVFILE")) {   // переопределения вариантов -> позиции (с подписями этой укладки)

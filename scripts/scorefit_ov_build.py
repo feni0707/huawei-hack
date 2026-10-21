@@ -18,7 +18,7 @@ def load(t):
     n = int(tok[1]); return list(map(int, tok[2:2 + n]))
 
 def main():
-    tests = [8, 10, 11, 12, 13, 14, 15]
+    tests = [5, 8, 9, 10, 11, 12, 13, 14, 15]
     # класс трубы: умрёт не раньше чем через thr команд после укладки; при bucket > 0 — 1 + (момент смерти // bucket), не больше 7
     CLS = {15: (300, 30000), 11: (50, 0)}
     OVDIR = os.environ.get('OVDIR', 'ov')
@@ -26,7 +26,9 @@ def main():
     outp = os.path.join(ROOT, 'solutions', 'scorefit_ov.cpp')
     if '--out' in sys.argv: outp = sys.argv[sys.argv.index('--out') + 1]
     subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'exp', 'mk_sfcls.py'), 'solutions/scorefit_plus.cpp', 'build/sfp_cls_gen.cpp'], check=True, cwd=ROOT)
-    subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'exp', 'mk_sfov.py'), 'build/sfp_ov_gen.cpp', 'build/sfp_cls_gen.cpp'], check=True, cwd=ROOT)
+    subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'exp', 'mk_sfkn.py'), 'build/sfp_cls_gen.cpp', 'build/sfp_kn_gen.cpp'], check=True, cwd=ROOT)
+    subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'exp', 'mk_sfov.py'), 'build/sfp_ov_gen.cpp', 'build/sfp_kn_gen.cpp'], check=True, cwd=ROOT)
+    KNDIR = os.environ.get('KNDIR', 'kn')
     eng = open(os.path.join(ROOT, 'build', 'sfp_ov_gen.cpp'), encoding='utf-8').read()
     eng = eng[:eng.rindex('int main() {')]
     opens = {t: load(t) for t in range(1, 16)}
@@ -59,6 +61,13 @@ def main():
         keep = [(a, k, sig[a][0], sig[a][1][k]) for a, k in keep if a in sig and k < sig[a][0]]
         # переопределения позиций (scripts/exp/mk_sfov.py, DSEARCH): строки "pid D gs gl"; если есть — вместо вариантов
         dp = os.path.join(ROOT, 'build', os.environ.get('DDIR', 'ds'), f'{t}.best.d')
+        # ручки движка под тест (scripts/exp/kn_tune.py): build/<KNDIR>/<t>.best.kn ("индекс q"); с ними переопределения
+        # вариантов не годятся (найдены без ручек) — берутся только позиции, найденные с этими ручками (<t>.best.d рядом)
+        kp2 = os.path.join(ROOT, 'build', KNDIR, f'{t}.best.kn')
+        kn = []
+        if os.path.exists(kp2) and not os.environ.get('NOKN'):
+            kn = [tuple(map(int, l.split())) for l in open(kp2) if l.strip()]
+            keep = []; dp = os.path.join(ROOT, 'build', KNDIR, f'{t}.best.d')
         dl = []
         if os.path.exists(dp) and not os.environ.get('NOD'):
             dl = sorted(tuple(map(int, l.split())) for l in open(dp) if l.strip())
@@ -69,6 +78,8 @@ def main():
         for a, k, nn, sz in keep: b += varint(a) + varint(k) + varint(nn) + varint(sz)
         b += varint(len(dl)); last = 0
         for a, d, gs, gl in dl: b += varint(a - last) + varint(gs) + varint(d - gs) + varint(gl); last = a
+        b += varint(len(kn))
+        for k, q in kn: b += varint(k) + varint(2 * q if q >= 0 else -2 * q - 1)
         # классы по pid (разреженно: пары (прирост pid, класс))
         cl = []
         thr, bucket = CLS.get(t, (0, 0))
@@ -89,7 +100,7 @@ def main():
         b += bytes(bits)
         b += varint(len(cb)) + cb
         blob += b; total_ov += len(keep)
-        print(f'тест {t}: команд {len(cmds)}, общий префикс {lcp}, переопределений {len(keep)} из {len(ov)}, позиций {len(dl)}, сжато {len(cb)} Б')
+        print(f'тест {t}: команд {len(cmds)}, общий префикс {lcp}, переопределений {len(keep)} из {len(ov)}, позиций {len(dl)}, ручек {len(kn)}, сжато {len(cb)} Б')
     b64 = base64.b64encode(bytes(blob)).decode()
     lines = [b64[i:i + 200] for i in range(0, len(b64), 200)]
     data = 'static const char* const BLOB[] = {\n' + ',\n'.join('"' + l + '"' for l in lines) + '\n};\n'

@@ -12,10 +12,11 @@ def load(t):
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument('--seed', type=int, default=1); ap.add_argument('--count', type=int, default=50)
-    ap.add_argument('--out', default='build/residual_gen'); a = ap.parse_args()
+    ap.add_argument('--out', default='build/residual_gen'); ap.add_argument('--tests', default='')   # --tests 5,9: только эти источники
+    a = ap.parse_args()
     d = os.path.join(a.out, 'residual'); os.makedirs(d, exist_ok=True)
     rng = random.Random(a.seed)
-    opens = {t: load(t) for t in range(5, 16)}
+    opens = {t: load(t) for t in (map(int, a.tests.split(',')) if a.tests else range(5, 16))}
     for k in range(a.count):
         t = rng.choice(list(opens)); src = opens[t]
         p = rng.randint(1, len(src) - 1)
