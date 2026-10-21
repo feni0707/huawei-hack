@@ -87,4 +87,4 @@ python3 scripts/bench.py build/bin/foo -j 1             # точный CPU (па
 - [x] Условие и материалы разобраны, инфраструктура прогона работает (macOS/Linux).
 - [x] Baseline: Total 4.91 / 32.1. Тривиальная верхняя оценка ≈ 30.76 / 32.1.
 - [x] Командная инфраструктура: генератор тестов `scripts/gen_tests.py`, бенчмарк `scripts/bench.py`, журнал `EXPERIMENTS.md`.
-- [ ] Основное решение.
+- [x] **Лучшее решение сейчас: `solutions/scorefit_guards.cpp`** — open 30.1539 / 32.1, 0 WA/TL, CPU на 15.in ≈ 0.3 с; на DEV/HOLD лучше `scorefit.cpp` (+0.107 % / +0.015 %). `hybrid.cpp` (вшитые открытые тесты) даёт 30.208, но на 15.in ≈ 11 с CPU (> 5 с лимита) — слать нельзя.
