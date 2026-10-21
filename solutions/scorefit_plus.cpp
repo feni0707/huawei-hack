@@ -740,7 +740,7 @@ struct Alloc {
         for (int f = 0; f < NF; f++) if (kappa(f) >= 0.6) any = true;   // иначе chooseStream точно вернёт -1
         if (!any) return;
         shadowBorn = (ll)pos.size();
-        shadow = new Alloc(*this);
+        shadow = new Alloc(*this); shadow->forceD = -1;
         shadow->shadow = 0; shadow->noStreams = true; shadow->gsh = 0;
     }
 
@@ -783,6 +783,7 @@ struct Alloc {
         }
     }
     // ---- команды
+    int forceD = -1;                     // >= 0 — подхват раскладки (см. place)
     void place(int L, ll& outN, ll& outD) {
         shadowCheck();
         if (shadow) { ll sn, sd; shadow->place(L, sn, sd); }
@@ -801,6 +802,7 @@ struct Alloc {
                                         | (1 << (5 + runIdx % 4)) | (1 << (9 + runIdx % 5))));
         bool bf = pureBF || (GUARD_ON && guardOn());
         int st = bf ? -1 : chooseStream(pid);
+        if (forceD >= 0) st = -1;   // подхват готовой раскладки: позиция задана снаружи
         stream.push_back((signed char)st);
         if (st >= 0) bornLab[st] += 1;
         for (int f = 0; f < NF; f++) {
@@ -812,6 +814,13 @@ struct Alloc {
         int ts = tailStart();
         double selfHz = recDelTot >= 1 ? rateOfLen(L) : 0;
         ll N = 0; int D = -1;
+        if (forceD >= 0) {   // труба уже лежит в [forceD, forceD + L) (раскладка выдана раньше) — только учёт
+            D = forceD;
+            if ((ll)D + L > T) { N = ((ll)D + L - T + 19) / 20; dig(N); }
+            int gs = D; while (gs > 0 && !occupied(gs - 1)) gs--;
+            takeFrom(gs, D, L);
+            finishPlace(pid, L, N, D, outN, outD); return;
+        }
         if (bf) { placePure(L, N, D); finishPlace(pid, L, N, D, outN, outD); return; }
         if (zoneTry(L, st, m, N, D)) { finishPlace(pid, L, N, D, outN, outD); return; }
 

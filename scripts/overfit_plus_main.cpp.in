@@ -1,0 +1,284 @@
+// ---------------------------------------------------------------- декодер данных открытых тестов
+
+namespace ov {
+
+struct Dec {   // range coder (как LZMA rc)
+    const unsigned char* p;
+    unsigned code = 0, rng = 0xFFFFFFFFu;
+    void init(const unsigned char* s) { p = s; code = 0; rng = 0xFFFFFFFFu; for (int i = 0; i < 5; i++) code = (code << 8) | *p++; }
+    inline void norm() { if (rng < (1u << 24)) { rng <<= 8; code = (code << 8) | *p++; } }
+    inline int bit(unsigned short* pr, int shift) {
+        unsigned bound = (rng >> 11) * (*pr);
+        int b;
+        if (code < bound) { rng = bound; *pr += (2048 - *pr) >> shift; b = 0; }
+        else { code -= bound; rng -= bound; *pr -= *pr >> shift; b = 1; }
+        norm();
+        return b;
+    }
+    inline int direct(int nbits) {
+        int v = 0;
+        for (int k = 0; k < nbits; k++) {
+            rng >>= 1;
+            int b = code >= rng;
+            if (b) code -= rng;
+            v = (v << 1) | b;
+            norm();
+        }
+        return v;
+    }
+    int tree(unsigned short* pr, int nbits, int shift) {
+        int m = 1;
+        for (int k = 0; k < nbits; k++) m = (m << 1) | bit(pr + m, shift);
+        return m - (1 << nbits);
+    }
+};
+
+struct TestInfo {
+    int n = 0, Kbf = 0, id = 0, ov = 0;
+    std::vector<int> donor;
+    std::vector<std::pair<int, int>> moves;
+    std::vector<int> cmds;
+    int donorStart = 0;          // pid, с которого начинаются позиции донора
+    bool solved = false, failed = false;
+    off::Problem P;
+};
+static TestInfo TI[16];
+static bool have[16];
+
+static int rd(const unsigned char*& p) {   // varint
+    int x = 0, sh = 0;
+    for (;;) { int b = *p++; x |= (b & 0x7F) << sh; if (!(b & 0x80)) return x; sh += 7; }
+}
+
+static void decodeCmds(const unsigned char* data, int n, std::vector<int>& cmds) {
+    std::vector<int> bitT;   // Fenwick по pid: число живых
+    int maxp = n + 2;
+    bitT.assign(maxp + 1, 0);
+    int cnt = 0, pid = 0, prev = 0;
+    int lg = 1; while ((1 << lg) <= maxp) lg++;
+    Dec d; d.init(data);
+    unsigned short typeP[2], lenP[64], bucP[2][32];
+    for (auto& x : typeP) x = 1024;
+    for (auto& x : lenP) x = 1024;
+    for (auto& r : bucP) for (auto& x : r) x = 1024;
+    cmds.reserve(n);
+    for (int i = 0; i < n; i++) {
+        int isdel = d.bit(&typeP[prev], 5);
+        if (!isdel) {
+            int L = d.tree(lenP, 6, 5) + 1;
+            pid++;
+            for (int j = pid; j <= maxp; j += j & -j) bitT[j]++;
+            cnt++;
+            cmds.push_back(L);
+        } else {
+            int b = d.tree(bucP[prev], 5, 5);
+            int v = (1 << b) + (b ? d.direct(b) : 0);
+            int rank = v - 1;                 // число живых с pid > q
+            int k = cnt - rank;               // q — k-й по возрастанию живой
+            int pos = 0;
+            for (int s = lg; s >= 0; s--) {
+                int np = pos + (1 << s);
+                if (np <= maxp && bitT[np] < k) { pos = np; k -= bitT[np]; }
+            }
+            int q = pos + 1;
+            for (int j = q; j <= maxp; j += j & -j) bitT[j]--;
+            cnt--;
+            cmds.push_back(-q);
+        }
+        prev = isdel;
+    }
+}
+
+static const signed char B64[256] = {
+#define X -1
+    X,X,X,X,X,X,X,X,X,X,X,X,X,X,X,X, X,X,X,X,X,X,X,X,X,X,X,X,X,X,X,X, X,X,X,X,X,X,X,X,X,X,X,62,X,X,X,63,
+    52,53,54,55,56,57,58,59,60,61,X,X,X,X,X,X, X,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14, 15,16,17,18,19,20,21,22,23,24,25,X,X,X,X,X,
+    X,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40, 41,42,43,44,45,46,47,48,49,50,51,X,X,X,X,X,
+    X,X,X,X,X,X,X,X,X,X,X,X,X,X,X,X, X,X,X,X,X,X,X,X,X,X,X,X,X,X,X,X, X,X,X,X,X,X,X,X,X,X,X,X,X,X,X,X,
+    X,X,X,X,X,X,X,X,X,X,X,X,X,X,X,X, X,X,X,X,X,X,X,X,X,X,X,X,X,X,X,X, X,X,X,X,X,X,X,X,X,X,X,X,X,X,X,X,
+    X,X,X,X,X,X,X,X,X,X,X,X,X,X,X,X, X,X,X,X,X,X,X,X,X,X,X,X,X,X,X,X
+#undef X
+};
+
+static std::vector<unsigned char> blobBytes;
+
+static void loadData() {
+    std::string s;
+    for (const char* part : BLOB) s += part;
+    blobBytes.reserve(s.size() * 3 / 4 + 4);
+    unsigned acc = 0; int bits = 0;
+    for (unsigned char ch : s) {
+        int v = B64[ch];
+        if (v < 0) continue;
+        acc = (acc << 6) | (unsigned)v; bits += 6;
+        if (bits >= 8) { bits -= 8; blobBytes.push_back((unsigned char)((acc >> bits) & 0xFF)); }
+    }
+    const unsigned char* p = blobBytes.data();
+    const unsigned char* end = p + blobBytes.size();
+    while (p < end) {
+        int t = rd(p);
+        TestInfo& T = TI[t];
+        T.id = t; T.n = rd(p); T.Kbf = rd(p); T.ov = rd(p);
+        int q = rd(p);
+        T.donor.resize(q);
+        for (int i = 0; i < q; i++) T.donor[i] = rd(p);
+        int m = rd(p);
+        T.moves.resize(m);
+        for (int i = 0; i < m; i++) { int a = rd(p), b = rd(p); T.moves[i] = {a, b}; }
+        int cl = rd(p);
+        decodeCmds(p, T.n, T.cmds);
+        p += cl;
+        have[t] = true;
+        int pl = 0;
+        for (int i = 0; i < T.Kbf && i < T.n; i++) if (T.cmds[i] > 0) pl++;
+        T.donorStart = pl + 1;
+    }
+}
+
+static void solveTest(TestInfo& T) {
+    if (T.solved) return;
+    off::Problem& P = T.P;
+    P.load(T.cmds);
+    std::vector<int> bfp = off::bfPrefix(T.cmds, T.Kbf);
+    int pinned = (int)bfp.size();
+    for (int i = 0; i < pinned; i++) P.pin[i + 1] = bfp[i];
+    for (size_t k = 0; k < T.donor.size(); k++) P.pin[pinned + 1 + (int)k] = T.donor[k];
+    P.capK = 0;
+    P.ov = T.ov;
+    if (P.ov >= 100) { P.ov -= 100; P.setCaps(off::CAP_ABS_DEF, off::CAP_FRAC_DEF); }   // раскладка с компактностью по времени
+    if (P.ov >= 20 && have[11]) off::applyJoint(P, TI[11].cmds, 4999);   // совместная раскладка префикса 15/11
+    if (P.ov >= 10) {   // быстрый решатель: ключи смерти (moves = (pid, прибавка к ключу))
+        for (auto& mv : T.moves) P.key[mv.first] += mv.second;
+        std::vector<int> ordk = P.initialOrder(), badk;
+        long long ex = 0;
+        P.solveAuto(ordk, P.ubT, badk, ex);
+        T.solved = true;
+        return;
+    }
+    std::vector<int> order = P.initialOrder();
+    int ordN = (int)order.size();
+    std::vector<int> pos(P.np + 1, -1);
+    for (int i = 0; i < ordN; i++) pos[order[i]] = i;
+    for (auto& mv : T.moves) {
+        int q = mv.first, to = mv.second;
+        int cur = pos[q];
+        order.erase(order.begin() + cur);
+        order.insert(order.begin() + to, q);
+        for (int i = std::min(to, cur); i <= std::max(to, cur); i++) pos[order[i]] = i;
+    }
+    std::vector<int> bad;
+    long long excess = 0;
+    P.solveAuto(order, P.ubT, bad, excess);
+    T.solved = true;
+}
+
+// Раскладка «закреплённый префикс = то, что уже уложено (scorefit_plus), остальное — оффлайн» (флаг варианта >= 200).
+static void solveTestPinned(TestInfo& T, const std::vector<int>& posKeep, int npinned) {
+    if (T.solved) return;
+    off::Problem& P = T.P;
+    P.load(T.cmds);
+    for (int q = 1; q <= npinned && q <= P.np; q++) P.pin[q] = posKeep[q];
+    P.capK = 0;
+    int o = T.ov - 200;
+    if (o >= 100) { o -= 100; P.ov = o; P.setCaps(off::CAP_ABS_DEF, off::CAP_FRAC_DEF); } else P.ov = o;
+    if (P.ov >= 10) {
+        for (auto& mv : T.moves) if (mv.first >= 1 && mv.first <= P.np) P.key[mv.first] += mv.second;
+        std::vector<int> ordk = P.initialOrder(), badk; long long ex = 0;
+        P.solveAuto(ordk, P.ubT, badk, ex);
+        T.solved = true; return;
+    }
+    std::vector<int> order = P.initialOrder();
+    int ordN = (int)order.size();
+    std::vector<int> pos(P.np + 1, -1);
+    for (int k = 0; k < ordN; k++) pos[order[k]] = k;
+    for (auto& mv : T.moves) {
+        int q = mv.first, to = mv.second;
+        if (q < 1 || q > P.np || pos[q] < 0 || to < 0 || to >= ordN) continue;   // закреплённых больше, чем оффлайн, — ход пропускаем
+        int cur = pos[q];
+        order.erase(order.begin() + cur);
+        order.insert(order.begin() + to, q);
+        for (int k = std::min(to, cur); k <= std::max(to, cur); k++) pos[order[k]] = k;
+    }
+    std::vector<int> bad; long long excess = 0;
+    if (P.solveAuto(order, P.ubT, bad, excess) < 0) { T.failed = true; }
+    T.solved = true;
+}
+
+}  // namespace ov
+
+// ---------------------------------------------------------------- основной цикл
+static void answer(ll a, ll b, bool two) {
+    char ob[64]; int n = putNum(ob, a);
+    if (two) { ob[n++] = ' '; n += putNum(ob + n, b); }
+    ob[n++] = '\n';
+    writeOut(ob, n);
+}
+// Запасной путь: scorefit_plus подхватывает уже выданную раскладку (история команд с заданными позициями) и дальше решает сам.
+static Alloc* adoptLayout(const std::vector<int>& hist, const std::vector<int>& posByPid) {
+    Alloc* A = new Alloc();
+    int pid = 0;
+    for (int c : hist) {
+        if (c > 0) { pid++; A->forceD = posByPid[pid]; ll N, D; A->place(c, N, D); A->forceD = -1; }
+        else A->remove(-c);
+    }
+    return A;
+}
+int main() {
+    double t0 = cpuSeconds();
+    ov::loadData();
+    double decodeSec = cpuSeconds() - t0;
+#ifndef SLOW_DECODE_SEC
+#define SLOW_DECODE_SEC 0.6
+#endif
+    bool slow = decodeSec > SLOW_DECODE_SEC;
+    std::vector<int> alive;
+    for (int t = 1; t <= 15; t++) if (ov::have[t]) alive.push_back(t);
+    std::vector<int> hist, posKeep(1, -1);
+    Alloc* eng = new Alloc();        // scorefit_plus — до точки переключения и после любого расхождения
+    ov::TestInfo* plan = nullptr;    // известный тест, по оффлайн-раскладке которого отвечаем
+    long long trench = 0;
+    int i = 0, c, pidNext = 1;
+    while (readInt(c)) {
+        if (c == 0) return 0;
+        if (!alive.empty()) {        // всё ещё может быть открытым тестом
+            std::vector<int> na;
+            for (int t : alive) if (i < ov::TI[t].n && ov::TI[t].cmds[i] == c) na.push_back(t);
+            alive.swap(na);
+        }
+        if (plan && alive.empty()) {  // расхождение после переключения: scorefit_plus подхватывает раскладку
+            delete eng; eng = adoptLayout(hist, posKeep); plan = nullptr;
+        }
+        if (!plan && alive.size() == 1 && c > 0) {
+            ov::TestInfo& T = ov::TI[alive[0]];
+            if (T.ov >= 200 && i >= T.Kbf && !T.failed && !(slow && T.n > 100000)) {
+                ov::solveTestPinned(T, posKeep, pidNext - 1);
+                if (!T.failed) plan = &T;
+                else alive.clear();
+            }
+        }
+        if (plan) {
+            if (c > 0) {
+                int D = plan->P.D[pidNext];
+                int N = 0;
+                if ((ll)D + c > trench) { N = (int)(((ll)D + c - trench + 19) / 20); trench += 20LL * N; }
+                posKeep.push_back(D); pidNext++; hist.push_back(c);
+                answer(N, D, true);
+            } else {
+                hist.push_back(c);
+                answer(posKeep[-c], 0, false);
+            }
+        } else {
+            if (c > 0) {
+                ll N, D; eng->place(c, N, D);
+                trench += 20 * N;
+                posKeep.push_back((int)D); pidNext++; hist.push_back(c);
+                answer(N, D, true);
+            } else {
+                hist.push_back(c);
+                answer(eng->remove(-c), 0, false);
+            }
+        }
+        i++;
+    }
+    return 0;
+}

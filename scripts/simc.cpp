@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 std::vector<int> ORD; long long CUR = 0, NCMD = 0;
+std::vector<unsigned char> gClsTab;   // классы труб для стенда (scripts/exp/mk_sfcls.py)
 double K[64]; // ручки экспериментов: env K="i=v i=v"
 #define main sf_main_unused
 #include SFSRC
@@ -39,6 +40,7 @@ int main(int argc, char** argv) {
         double w; std::vector<int> cmd = readTest(argv[a], w);
         Alloc* A = new Alloc();
         ORD.assign(1, 0); { for (size_t i = 0; i < cmd.size(); i++) { if (cmd[i] > 0) ORD.push_back(1 << 30); else if (cmd[i] < 0) ORD[-cmd[i]] = (int)i; } }
+        FILE* posF = getenv("DUMPPOS") ? fopen(getenv("DUMPPOS"), "w") : nullptr;
         FILE* frontF = getenv("FRONT") ? fopen(getenv("FRONT"), "w") : nullptr; long long frontStep = getenv("FRONTSTEP") ? atoll(getenv("FRONTSTEP")) : 100;
         std::vector<int> cells; std::vector<int> plen(1, 0); std::vector<char> ever; std::vector<int> freedAt; std::vector<int> lastl;
         unsigned long long hsh = 1469598103934665603ULL;   // FNV-хеш всех ответов (сверка «ответы не изменились»)
@@ -52,6 +54,7 @@ int main(int argc, char** argv) {
             if (ncut > 1 && ci > 0) { long long lo = n - n / 10, st = std::max(1LL, n / 10 / ncut); if (ci >= lo && (ci - lo) % st == 0 && !cells.empty()) { cutSum += (double)occ / cells.size(); cutCnt++; } }
             if (c > 0) {
                 ll N, D; A->place(c, N, D);
+                if (posF) fprintf(posF, "%lld ", D);
                 hsh = (hsh ^ (unsigned long long)(N * 1000003 + D)) * 1099511628211ULL;
                 ll T = (ll)cells.size() + 20 * N;
                 if (digs && N > 0) printf("dig ci=%lld L=%d N=%lld T=%lld occ=%lld free=%lld\n", ci, c, N, T, occ, (ll)cells.size() - occ);
@@ -91,6 +94,7 @@ int main(int argc, char** argv) {
             if (getenv("NEVSEG")) { size_t i = 0; printf("NEV:"); while (i < e) { if (cells[i] || ever[i]) { i++; continue; } size_t j = i; while (j < e && !cells[j] && !ever[j]) j++; printf(" %zu+%zu", i, j - i); i = j; } printf(" T=%zu\n", cells.size()); }
         }
         if (frontF) fclose(frontF);
+        if (posF) fclose(posF);
         printf("%s w=%g kpi=%.6f T=%zu h=%016llx%s\n", argv[a], w, kpi, cells.size(), hsh, ok ? "" : " WA");
         fflush(stdout);
         delete A;

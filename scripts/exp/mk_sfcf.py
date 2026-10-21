@@ -71,7 +71,7 @@ feat = r'''
         double c = gapCost(gs, s, L, st, m, selfHz);
         if (gJitter > 0 && c < 1e17) c += gJitter * jrnd();
         if (st >= 0 || T < 60 || c >= 1e17) return c;
-        if (!gCWset && !gRecord) return c;
+        if (!gCWset && !gRecord && gForcePid < 0) return c;
         CfOpt o; o.g = gs; o.s = s;
         gapFeat(gs, s, L, m, selfHz, c, o.f);
         if (gCWset) { double d = 0; for (int i = 0; i < NFT; i++) d += gCW[i] * o.f[i]; c += d; }
