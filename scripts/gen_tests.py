@@ -8,6 +8,8 @@
   phases        — длинная фаза коротких труб без удалений, смешанные фазы, в конце длинные трубы (как 14)
   periodic      — периодический паттерн коротких длин, выборочные удаления по смещениям в периоде,
                   затем дозаполнение «уложить, уложить, удалить» (как 10)
+  short_long    — две фазы: короткие трубы 1..7, затем длинные 8..maxL с удалением «полосы» старых коротких
+                  (калибровано по реальным 11 и 15; best fit даёт KPI ≈ 0.90–0.95, как на них)
 
 Формат: `<weight> <n>`, n команд, завершающий 0. Удаляются только живые PID, длины 1..40, n ≤ 200000.
 Детерминированность: один и тот же --seed даёт те же файлы (у каждого теста свой sub-seed).
@@ -223,12 +225,121 @@ def gen_periodic(rng, n):
     return b.cmds
 
 
+
+# ---- short_long: семейство тестов 11/15 (две фазы: короткие трубы, затем длинные). Откалибровано по реальным 11 и 15:
+# фаза 1 (первая половина): 80 % укладок длины 1..7, удаления «недавних» (лог-нормальный ранг, медиана ≈ 10);
+# фаза 2: укладки только длины 8..maxL, 50 % удалений: ~83 % недавние длинные (эмпирическое распределение рангов),
+# ~15 % — равномерно из окна рождения [a1·n, n/2] (плотная «полоса» коротких труб), ~1.4 % — из узкого окна около
+# 0.17·n, остальное — равномерный фон. Внутри пачек удаления независимы (соседние PID не удаляются подряд).
+_OCT1 = [7.6, 6.8, 12.1, 17.4, 20.9, 17.5, 10.9, 5.2, 1.3, 0.2]                   # фаза 1, ранг от новейшей живой
+_OCT2 = [2.2, 2.3, 4.1, 7.4, 12.2, 16.3, 16.0, 12.1, 8.0, 5.5, 3.8, 3.5, 3.6, 2.9]  # фаза 2, недавние длинные
+
+
+class _Fenwick:
+    def __init__(self, n):
+        self.n = n
+        self.t = [0] * (n + 1)
+        self.top = 1
+        while self.top * 2 <= n:
+            self.top *= 2
+
+    def add(self, i, v):
+        while i <= self.n:
+            self.t[i] += v
+            i += i & -i
+
+    def pre(self, i):
+        r = 0
+        while i > 0:
+            r += self.t[i]
+            i -= i & -i
+        return r
+
+    def kth(self, k):          # k-й по порядку (1-based) живой индекс
+        pos, step = 0, self.top
+        while step:
+            nx = pos + step
+            if nx <= self.n and self.t[nx] < k:
+                pos = nx
+                k -= self.t[nx]
+            step >>= 1
+        return pos + 1
+
+
+def _draw_rank(rng, oct_w):
+    k = rng.choices(range(len(oct_w)), oct_w)[0]
+    if k == 0:
+        return 0
+    lo, hi = 1 << (k - 1), 1 << k
+    return lo + int(rng.random() * (hi - lo))
+
+
+def gen_short_long(rng, n):
+    smax = 7 if rng.random() < 0.7 else rng.randint(4, 10)
+    maxl = rng.choice([40, 40, 36, 32, 28]) if smax < 27 else MAX_LEN
+    p1, p2 = rng.uniform(0.17, 0.23), rng.uniform(0.46, 0.5)
+    a1 = rng.uniform(0.32, 0.40)
+    pm, pb, pg = rng.uniform(0.12, 0.17), rng.uniform(0.008, 0.02), rng.uniform(0.01, 0.025)
+    bc, bw = rng.uniform(0.13, 0.20), rng.uniform(0.03, 0.05)
+    allf, longf = _Fenwick(n + 5), _Fenwick(n + 5)
+    is_long = set()
+    cmds, alive, alive_long, pid, split = [], 0, 0, 0, n // 2
+    lo_pid = b_lo = b_hi = hi_pid = None
+    for i in range(n):
+        if lo_pid is None and i >= int(a1 * n):
+            lo_pid = pid + 1
+        if b_lo is None and i >= int((bc - bw / 2) * n):
+            b_lo = pid + 1
+        if b_hi is None and i >= int((bc + bw / 2) * n):
+            b_hi = pid
+        if hi_pid is None and i >= split:
+            hi_pid = pid
+        ph1 = i < split
+        if alive > 0 and rng.random() < (p1 if ph1 else p2):
+            if ph1:
+                idx = allf.kth(alive - min(_draw_rank(rng, _OCT1), alive - 1))
+            else:
+                u, idx = rng.random(), None
+                if u < pm and hi_pid >= lo_pid and allf.pre(hi_pid) - allf.pre(lo_pid - 1) > 0:
+                    c0 = allf.pre(lo_pid - 1)
+                    idx = allf.kth(c0 + rng.randint(1, allf.pre(hi_pid) - c0))
+                elif pm <= u < pm + pb and b_hi is not None and b_hi >= b_lo and \
+                        allf.pre(b_hi) - allf.pre(b_lo - 1) > 0:
+                    c0 = allf.pre(b_lo - 1)
+                    idx = allf.kth(c0 + rng.randint(1, allf.pre(b_hi) - c0))
+                elif pm + pb <= u < pm + pb + pg:
+                    idx = allf.kth(rng.randint(1, alive))
+                if idx is None:
+                    if alive_long > 0:
+                        idx = longf.kth(alive_long - min(_draw_rank(rng, _OCT2), alive_long - 1))
+                    else:
+                        idx = allf.kth(alive - min(_draw_rank(rng, _OCT1), alive - 1))
+            allf.add(idx, -1)
+            alive -= 1
+            if idx in is_long:
+                longf.add(idx, -1)
+                alive_long -= 1
+            cmds.append(-idx)
+        else:
+            L = rng.randint(1, smax) if ph1 else rng.randint(smax + 1, maxl)
+            pid += 1
+            allf.add(pid, 1)
+            alive += 1
+            if not ph1:
+                longf.add(pid, 1)
+                alive_long += 1
+                is_long.add(pid)
+            cmds.append(L)
+    return cmds
+
+
 CLASSES = {
     "sorted_groups": (gen_sorted_groups, [2000, 7500, 9000]),
     "alternating": (gen_alternating, [1500, 6500, 10000]),
     "random_bursts": (gen_random_bursts, [10000, 50000, 200000]),
     "phases": (gen_phases, [10000, 25000]),
     "periodic": (gen_periodic, [3000, 10000]),
+    "short_long": (gen_short_long, [10000, 50000, 200000]),
 }
 
 
