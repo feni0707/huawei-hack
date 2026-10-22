@@ -4,3 +4,5 @@ score.txt
 answer.txt
 report.txt
 *.o
+.claude/
+S/
