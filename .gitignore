@@ -6,3 +6,8 @@ report.txt
 *.o
 .claude/
 S/
+
+# материалы организаторов (см. README, раздел «Материалы организаторов»)
+materials/
+docs/statement.pdf
+docs/img/
